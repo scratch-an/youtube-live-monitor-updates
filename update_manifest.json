@@ -1,7 +1,7 @@
 {
-  "version": "7.4.10",
+  "version": "7.4.11",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.10.py",
-  "sha256": "70e803ea7e11f7d9a8cfefc6267dc737de347d0654e9882eebd59730f2344ac7",
-  "notes": "重要な金融発言の候補に〇を表示。画面・文字起こしTXT・投稿補助へ反映。記者・司会の発言を除外し、否定の政策判断も対象。追加API利用なし。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.11.py",
+  "sha256": "f29981044e1ed1e923f4a296fcb638efc51f4b3c8c3e4cd7df09302790c6aa09",
+  "notes": "同梱FFmpegをyt-dlpにも指定。音声取得側とFFmpeg側のエラーを表示・保存し、stderrパイプ詰まりを防止。音声取得失敗判明時はWhisper読込みを省略。"
 }
