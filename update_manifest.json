@@ -1,7 +1,7 @@
 {
-  "version": "7.4.2",
+  "version": "7.4.3",
   "file": "app.py",
   "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/app.py",
-  "sha256": "522e4552424e8b0b42173efa3fbb3f6a2226bcba62fdd1b5644ae3769c9bf6af",
-  "notes": "GitHub自動更新対応版"
+  "sha256": "1f0e6679b2beb4c2bd7ce148ac87adc696021fcbea7b8f07dfecc4c4e87b051f",
+  "notes": "アーカイブ動画の英語・日本語自動判定と話者誤表示を修正"
 }
