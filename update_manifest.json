@@ -1,7 +1,7 @@
 {
-  "version": "7.4.3",
+  "version": "7.4.4",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/app.py",
-  "sha256": "1f0e6679b2beb4c2bd7ce148ac87adc696021fcbea7b8f07dfecc4c4e87b051f",
-  "notes": "アーカイブ動画の英語・日本語自動判定と話者誤表示を修正"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.4.py",
+  "sha256": "a965f4470dba625459fbb95fa83c33db8e3479b928b632b270aab7ab0b654eca",
+  "notes": "英語の認識ヒントによる異常反復を防止。長い英文の反復を再認識し、再発時は出力を保留。"
 }
