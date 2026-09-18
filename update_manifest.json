@@ -1,7 +1,7 @@
 {
-  "version": "7.4.6",
+  "version": "7.4.7",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.6.py",
-  "sha256": "3abea73d0c6deb54383208b3f1d621d882df3db6a92a32252ae81d4236bdf028",
-  "notes": "省略符号・敬称での誤分割を修正。翻訳文体を統一し、不明箇所を明示するよう指示。TXTにプログラム版を記録。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.7.py",
+  "sha256": "7a4565c349d5a14aabe82841237421f7355374408625347aed12160b83101dc7",
+  "notes": "保存済み英語音声をsmall/mediumで比較する --compare-audio を追加。認識結果と処理時間を記録。監視・翻訳の設定変更なし。"
 }
