@@ -1,7 +1,7 @@
 {
-  "version": "7.4.5",
+  "version": "7.4.6",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.5.py",
-  "sha256": "fd791eca9c9c0e7a0be4c4499a4c9bc084011f3045798cc49f78b9cea2c485d7",
-  "notes": "英語の文末判定を修正。未完文を持ち越し、直前文脈を参照して翻訳。短文の投稿分割を抑制。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.6.py",
+  "sha256": "3abea73d0c6deb54383208b3f1d621d882df3db6a92a32252ae81d4236bdf028",
+  "notes": "省略符号・敬称での誤分割を修正。翻訳文体を統一し、不明箇所を明示するよう指示。TXTにプログラム版を記録。"
 }
