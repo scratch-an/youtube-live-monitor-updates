@@ -1,7 +1,7 @@
 {
-  "version": "7.4.9",
+  "version": "7.4.10",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.9.py",
-  "sha256": "51574d56a04b157bdc0d67bc09c365a9513242beeb90c42d3b7a74d386a7456b",
-  "notes": "短い英文の異常反復を検出して再認識。出力保留区間をTXTに記録。確認済みのno longer否定逆転パターンを表示・投稿候補から保留。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.10.py",
+  "sha256": "70e803ea7e11f7d9a8cfefc6267dc737de347d0654e9882eebd59730f2344ac7",
+  "notes": "重要な金融発言の候補に〇を表示。画面・文字起こしTXT・投稿補助へ反映。記者・司会の発言を除外し、否定の政策判断も対象。追加API利用なし。"
 }
