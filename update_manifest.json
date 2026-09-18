@@ -1,7 +1,7 @@
 {
-  "version": "7.4.8",
+  "version": "7.4.9",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.8.py",
-  "sha256": "325c8a5f9b22be8e8beae29e3a06c38177e240d4d76e99813ff540d349ac289f",
-  "notes": "英語はmedium/beam5と2チャンク結合で認識。時間上限でも完成した文だけ確定し未完末尾を持ち越す。日本語モデル設定は従来どおり。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.9.py",
+  "sha256": "51574d56a04b157bdc0d67bc09c365a9513242beeb90c42d3b7a74d386a7456b",
+  "notes": "短い英文の異常反復を検出して再認識。出力保留区間をTXTに記録。確認済みのno longer否定逆転パターンを表示・投稿候補から保留。"
 }
