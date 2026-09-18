@@ -24,7 +24,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.2"
+APP_VERSION = "7.4.3"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -1867,6 +1867,74 @@ def transcribe_chunks(
         f.flush()
 
 
+def archive_media_info(url):
+    """yt-dlpから実際の動画タイトルと言語情報を取得する。"""
+    command = [
+        sys.executable, "-m", "yt_dlp",
+        "--skip-download", "--no-warnings",
+        "--print", "%(title)s",
+        "--print", "%(language)s",
+        url,
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=True,
+        )
+        values = [line.strip() for line in completed.stdout.splitlines()]
+        actual_title = values[0] if values else ""
+        language = values[1].lower() if len(values) >= 2 else ""
+        if language in {"na", "none", "null", "unknown"}:
+            language = ""
+        return actual_title, language
+    except Exception as e:
+        print(f"⚠️ 動画情報を取得できないためタイトルから判定します: {e}")
+        return "", ""
+
+
+def archive_language_and_speaker(url, supplied_title, video_id):
+    """任意のアーカイブ動画について、実タイトルから言語と話者を安全に決める。"""
+    known_speaker = CONFIG.get("archive_official_speakers", {}).get(video_id)
+    if known_speaker:
+        return "ja", known_speaker, supplied_title
+
+    actual_title, metadata_language = archive_media_info(url)
+    combined_title = f"{actual_title} {supplied_title}".strip()
+    english_terms = (
+        "bessent", "treasury", "federal reserve", "powell", "fomc",
+        "stanford", "commencement", "english", "u.s.", "united states",
+    )
+    japanese_chars = len(re.findall(r"[ぁ-んァ-ヶ一-龯]", actual_title))
+    ascii_letters = len(re.findall(r"[A-Za-z]", actual_title))
+    is_english = (
+        metadata_language.startswith("en")
+        or any(term in combined_title.lower() for term in english_terms)
+        or (ascii_letters >= 8 and japanese_chars == 0)
+    )
+    language = "en" if is_english else "ja"
+
+    lowered = combined_title.lower()
+    if "bessent" in lowered or "ベッセント" in combined_title:
+        speaker = "スコット・ベッセント 米財務長官"
+    elif "powell" in lowered or "パウエル" in combined_title:
+        speaker = "ジェローム・パウエル FRB議長"
+    else:
+        # 任意のテスト動画を日本の監視対象者だと誤表示しない。
+        speaker = "話者未確認"
+
+    shown_title = actual_title or supplied_title
+    print(f"🌐 アーカイブ言語判定: {'英語' if language == 'en' else '日本語'}")
+    print(f"👤 話者表示: {speaker}")
+    if actual_title:
+        print(f"🎬 動画タイトル: {actual_title}")
+    return language, speaker, shown_title
+
+
 def process_url(url, title="YouTube Archive"):
     m = re.search(r"(?:v=|youtu\.be/|/live/)([A-Za-z0-9_-]{6,})", url)
     video_id = m.group(1) if m else "archive_test"
@@ -1901,16 +1969,11 @@ def process_url(url, title="YouTube Archive"):
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        archive_language = "en" if re.search(r"Bessent|ベッセント", title, re.I) else "ja"
-        archive_speaker = (
-            "スコット・ベッセント 米財務長官"
-            if archive_language == "en"
-            else CONFIG.get("archive_official_speakers", {}).get(
-                video_id, CONFIG.get("default_official_speaker", "高市総理")
-            )
+        archive_language, archive_speaker, detected_title = archive_language_and_speaker(
+            url, title, video_id
         )
         transcribe_chunks(
-            chunks_dir, txt_path, stop_event, title, video_id,
+            chunks_dir, txt_path, stop_event, detected_title, video_id,
             official_speaker=archive_speaker,
             source_language=archive_language,
             pause_event=pause_event,
