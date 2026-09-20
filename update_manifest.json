@@ -1,7 +1,7 @@
 {
-  "version": "7.4.14",
+  "version": "7.4.15",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.14.py",
-  "sha256": "50121a7c52d1e834627686b7206bffa413e14f0564e46ca342f7ef7a55633f81",
-  "notes": "AI投稿区切りのJSON解析に失敗した場合、前後の説明文を除去して救済し、形式を厳しく指定して1回再試行。それでも失敗した場合のみ句読点判定へ切替。失敗応答分もAPI使用量へ記録。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.15.py",
+  "sha256": "40fb1cd24f9697c4fe30e5c82a68d23e7d82e6974b641ad20d6ffbafcf153062",
+  "notes": "旧config.jsonと新版の公式話者・時間範囲設定を統合。片山財務大臣会見の残存誤認識を補正。投稿分割は句点を優先し、数値・専門語・接続表現の途中を回避。"
 }
