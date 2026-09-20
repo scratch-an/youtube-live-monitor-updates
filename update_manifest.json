@@ -1,7 +1,7 @@
 {
-  "version": "7.4.22",
+  "version": "7.4.23",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.22.py",
-  "sha256": "9b0fb2993b38c22dc032d730680c3adae1c5fae05e010223baa89d38fca5838c",
-  "notes": "財務省公式会見ページの文字コードを複数候補から判定し、冒頭発言から質疑応答・（以上）まで確実に抽出。取得失敗時は具体的な理由を表示。更新確認だけを実行できる「最新版へ更新.bat」をアプリと同じフォルダへ自動生成。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.23.py",
+  "sha256": "8fe8b32513c63621b81c010c87e17da967974495d6cbdcefffa9faf5c130c869",
+  "notes": "公式会見概要との補正を短いWhisper断片単位から約40秒の連続発言単位へ変更し、固有名詞・専門用語・文頭脱落を文脈から補正。隣接チャンクと同一断片内の重複を除去。記者開始時刻を修正し、同一話題は約260文字まで自然につなげて投稿候補化。"
 }
