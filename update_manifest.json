@@ -1,7 +1,7 @@
 {
-  "version": "7.4.16",
+  "version": "7.4.17",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.16.py",
-  "sha256": "01d67edc13298370078ea2ab39347222c2a393b5c94f9a3cb66bef67646fef35",
-  "notes": "比較用文字起こしを反映。記者自己紹介・質問継続・大臣回答開始の話者判定を改善し、記者発言への重要マークを抑止。片山財務大臣会見の確認済み誤認識を補正し、重要発言の投稿確定を少し待って関連文をまとめる。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.17.py",
+  "sha256": "3b9c9e4e6c41ebf2e7f64800b7b62c4cfdffc3ccbe2eeb4666c91ed577b7cd67",
+  "notes": "アーカイブテストのみ40秒・2チャンク認識へ変更し、前後文脈と欠落耐性を改善。LIVEは従来の20秒認識を維持。ブルームバーグ記者から片山財務大臣への話者境界、確認済みの金融・財政用語、文章結合を補正。"
 }
