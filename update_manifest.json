@@ -1,7 +1,7 @@
 {
-  "version": "7.4.18",
+  "version": "7.4.19",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.18.py",
-  "sha256": "3b1e62a20f17f58744194c2a0a5ea633573a8bf24806e3a33e5422a000984cfa",
-  "notes": "40秒認識内に混在した大臣・幹事社・記者の発言を定型句で分割し、投稿候補にも話者名を表示。衆院選、物価高対策、沖縄振興予算、読売新聞記者の財源質問など、比較確認済みの誤認識を補正。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.19.py",
+  "sha256": "c12cb3fc1517bd273bb774521fde22d08e4450053bb9fed24a28eab6015db667",
+  "notes": "分割後の最終投稿だけが短い場合、許容範囲内で直前投稿へ結合。不自然な「こととし、」終わりと短い5/5を解消。万全を期す、資金繰り支援、具体化の誤認識を補正。"
 }
