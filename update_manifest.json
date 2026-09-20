@@ -1,7 +1,7 @@
 {
-  "version": "7.4.12",
+  "version": "7.4.13",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.12.py",
-  "sha256": "aa1ea4b663818fd897206abb27762d97f16307a6f57c1307a88adcaec89cc18f",
-  "notes": "日本語タイトル文字化け修正、重要発言〇、関連短文のまとめ、日銀会見の専門語補正と話者判定改善、投稿候補リストの最下部自動スクロールと縦スクロールバー追加。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.13.py",
+  "sha256": "33e483f4c79b9571ad9e1328928ce8040f075f6b54e665250eeedd8e29880ac1",
+  "notes": "日銀・片山財務大臣会見の比較結果を反映。動画別の専門語補正、公式話者登録、話者判定改善、消費税・税率・減税・防衛費の重要発言判定を追加。"
 }
