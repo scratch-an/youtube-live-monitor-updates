@@ -1,0 +1,7 @@
+{
+  "version": "7.4.21",
+  "file": "app.py",
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.21.py",
+  "sha256": "38044c85e7bd5b38df72cbd4a6ae61799b28e724f15ce473fe4d4ba39b62de48",
+  "notes": "予約LIVEの開始5分前から財務省・日銀公式ページを1分間隔で監視し、先行公開された会見概要・金融政策資料をLIVE文字起こし補正へ動的に反映。開始後10分まで監視し、取得失敗時は従来認識を継続。"
+}
