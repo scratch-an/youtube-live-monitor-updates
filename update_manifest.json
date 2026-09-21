@@ -1,7 +1,7 @@
 {
-  "version": "7.4.26",
+  "version": "7.4.27",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.26.py",
-  "sha256": "deb5395dfdbcf4be9c2612a4f0dcc88f623747ef3adac420d7f8a13089e1680d",
-  "notes": "軽量声質判定を既定で停止。財務省公式原稿を進行順に照合し、問・答の区分を話者判定へ反映。令和9年度予算、概算要求、143.1兆円などの確認済み誤認識を修正。無音判定で空になった区間はVADを外して再認識し、欠落を抑制。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.27.py",
+  "sha256": "102d342edadaa5ff56191fb225183a4993e0eec490a7d338b835722412860ca3",
+  "notes": "片山財務大臣の確認済み音声から作成した音声プロファイルを高確信時の話者判定に追加。公式原稿の進行追跡が低一致で先へ飛ばないよう修正。会見開始の運営発言を記者として判定。長い未認識区間はVADを外して再認識。日本語投稿候補から【AI文字起こし・確認中】を削除。"
 }
