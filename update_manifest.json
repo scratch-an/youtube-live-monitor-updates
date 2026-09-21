@@ -1,7 +1,7 @@
 {
-  "version": "7.4.23",
+  "version": "7.4.25",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.23.py",
-  "sha256": "8fe8b32513c63621b81c010c87e17da967974495d6cbdcefffa9faf5c130c869",
-  "notes": "公式会見概要との補正を短いWhisper断片単位から約40秒の連続発言単位へ変更し、固有名詞・専門用語・文頭脱落を文脈から補正。隣接チャンクと同一断片内の重複を除去。記者開始時刻を修正し、同一話題は約260文字まで自然につなげて投稿候補化。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.25.py",
+  "sha256": "794dce98496574babb614e24166f7da9d87d6531089ebc3eb0cdde8d8f380319",
+  "notes": "投稿候補を見出し・話者名・分割番号込み200文字以内に制限。動画タイトルと軽量声質特徴を使う話者判定を追加し、片山財務大臣・記者・司会の切替を改善。誤認識補正と低品質候補の投稿保留を追加。2026年9月4日会見の財務省公式原稿との照合に対応。"
 }
