@@ -1,7 +1,7 @@
 {
-  "version": "7.4.25",
+  "version": "7.4.26",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app-7.4.25.py",
-  "sha256": "794dce98496574babb614e24166f7da9d87d6531089ebc3eb0cdde8d8f380319",
-  "notes": "投稿候補を見出し・話者名・分割番号込み200文字以内に制限。動画タイトルと軽量声質特徴を使う話者判定を追加し、片山財務大臣・記者・司会の切替を改善。誤認識補正と低品質候補の投稿保留を追加。2026年9月4日会見の財務省公式原稿との照合に対応。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.26.py",
+  "sha256": "deb5395dfdbcf4be9c2612a4f0dcc88f623747ef3adac420d7f8a13089e1680d",
+  "notes": "軽量声質判定を既定で停止。財務省公式原稿を進行順に照合し、問・答の区分を話者判定へ反映。令和9年度予算、概算要求、143.1兆円などの確認済み誤認識を修正。無音判定で空になった区間はVADを外して再認識し、欠落を抑制。"
 }
