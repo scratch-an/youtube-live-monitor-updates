@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.33"
+APP_VERSION = "7.4.34"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -260,6 +260,8 @@ DEFAULT_CONFIG = {
         "https://www.mof.go.jp/public_relations/weekly_schedule/index.htm",
         "https://g20.org/events-calendar/",
         "https://www.boj.or.jp/",
+        "https://www.kantei.go.jp/",
+        "https://www.mofa.go.jp/mofaj/fp/un/index.html",
         "https://home.treasury.gov/news/press-releases/statements-remarks/secretary"
     ],
     "event_keywords": [
@@ -268,7 +270,7 @@ DEFAULT_CONFIG = {
         "Central Bank Governors", "Annual Meetings",
         "総裁記者会見ライブ配信", "金融政策決定会合",
         "審議委員", "副総裁", "Bessent", "ベッセント",
-        "House Financial Services Committee"
+        "House Financial Services Committee", "国連総会", "United Nations", "UNGA"
     ],
     # 公式ページで拾えない予定は "2026-10-15" の形式で追加できる。
     "manual_event_dates": [],
@@ -377,6 +379,14 @@ DEFAULT_CONFIG = {
         "Reuters": "UChqUTb7kYRX8-EiaN3XFrSQ",
         "C-SPAN": "UCb--64Gl51jIEVE-GLDAVTg"
     },
+    # ユーザー指定の重要LIVE。検索APIやチャンネルフィードに依存せず確認する。
+    "priority_video_ids": {
+        "7JVTgADONZ4": {
+            "title": "国連総会 一般討論演説 生中継 高市首相",
+            "person": "高市総理",
+            "channel": "首相官邸・国連LIVE直接監視"
+        }
+    },
     "default_official_speaker": "高市総理",
     "archive_official_speakers": {
         "oEqKmehjjvA": "高市総理",
@@ -399,7 +409,13 @@ DEFAULT_CONFIG = {
     "official_pre_live_monitor_after_start_minutes": 10,
     "official_live_source_urls": {
         "mof": "https://www.mof.go.jp/public_relations/conference/index.html",
-        "boj": "https://www.boj.or.jp/"
+        "boj": "https://www.boj.or.jp/",
+        "pm": [
+            "https://www.kantei.go.jp/jp/105/statement/index.html",
+            "https://www.kantei.go.jp/jp/105/actions/index.html",
+            "https://www.mofa.go.jp/mofaj/fp/un/index.html",
+            "https://www.gov-online.go.jp/press_conferences/prime_minister/"
+        ]
     },
     "archive_speaker_ranges": {
         "BKP1wLgA3U8": [
@@ -476,6 +492,8 @@ WHISPER_PROMPT = (
     "高田創審議委員、田村直樹審議委員、小枝淳子審議委員、増一行審議委員、"
     "浅田統一郎審議委員、佐藤綾野審議委員、金融政策決定会合、展望レポート、"
     "閣議後記者会見、幹事社、2027年国際園芸博覧会、"
+    "国際連合、国連総会、一般討論演説、ニューヨーク、国連改革、多国間主義、"
+    "安全保障理事会、常任理事国、グテーレス国連事務総長、日本の国連加盟70周年、"
     "為替市場、為替相場、ファンダメンタルズ、ベッセント財務長官、米国財務省、"
     "日銀、為替介入、日米協調介入、秩序ある為替市場、政策立案者、"
     "ウォールストリート・ジャーナル、ヘッジファンド、原油価格、中東情勢、ホルムズ海峡、"
@@ -579,6 +597,21 @@ VIDEO_TEXT_CORRECTIONS = {
         ("実行性", "実効性"),
         ("成長への企業", "成長への寄与"),
         ("費用的起用対効果", "費用対効果"),
+        ("費用的・起用対効果", "費用対効果"),
+        ("市場の新人", "市場の信認"),
+        ("管理者からにも質問させていただきます", "幹事社から質問させていただきます"),
+        ("あと一つ目はこちら 今公表お話ししております 財産要求についてお伺いします", "1つ目は、今、公表のあった概算要求についてお伺いします"),
+        ("一般会計の財産要求の総額が 予算の影響が最大となりますが", "一般会計の概算要求の総額が過去最大となりますが"),
+        ("応急条件の撤廃", "要求上限の撤廃"),
+        ("長期対流資金", "長期滞留資金"),
+        ("国土巨人化", "国土強靱化"),
+        ("税収同行", "税収動向"),
+        ("財務残高の対GDP比", "債務残高の対GDP比"),
+        ("リフレ製作", "リフレ政策"),
+        ("抜群的な予算編成制度改革", "抜本的な予算編成制度改革"),
+        ("補正を行うことが通令化", "補正を行うことが通例化"),
+        ("ベセント長官", "ベッセント長官"),
+        ("プレスコンファレンス", "プレスカンファレンス"),
         ("国土強靱化などにかかる 自己要求となっております。 というが行われております。", "国土強靱化などに係る事項要求が行われております。"),
         ("自己要求となっております。 というが行われております。", "事項要求が行われております。"),
         ("自己要求", "事項要求"),
@@ -953,11 +986,16 @@ def load_config():
     # 旧config.jsonの辞書で、新版に追加した対象者・動画設定を消さない。
     for key in (
         "archive_official_speakers", "archive_speaker_ranges",
-        "archive_official_reference_urls",
+        "archive_official_reference_urls", "priority_video_ids",
     ):
         merged_mapping = dict(DEFAULT_CONFIG.get(key, {}))
         merged_mapping.update(cfg.get(key, {}))
         out[key] = merged_mapping
+    official_sources = dict(DEFAULT_CONFIG.get("official_live_source_urls", {}))
+    official_sources.update(cfg.get("official_live_source_urls", {}))
+    # 高市総理向けの追加監視先は旧config.jsonに存在しないため常に維持する。
+    official_sources["pm"] = DEFAULT_CONFIG["official_live_source_urls"]["pm"]
+    out["official_live_source_urls"] = official_sources
     return out
 
 
@@ -1339,16 +1377,63 @@ def _extract_pdf_text(content):
 
 
 def discover_live_official_reference(person, scheduled_start):
-    """当日公開された財務省会見概要または日銀資料を探す。"""
+    """当日公開された財務省・日銀・首相官邸等の公式資料を探す。"""
     sources = CONFIG.get("official_live_source_urls", {})
     if "日銀" in person or "日本銀行" in person:
         kind = "boj"
     elif any(x in person for x in ("財務大臣", "財務官", "片山", "三村")):
         kind = "mof"
+    elif any(x in person for x in ("高市", "総理")):
+        kind = "pm"
     else:
         return "", ""
 
-    index_url = str(sources.get(kind, "")).strip()
+    source_value = sources.get(kind, "")
+    if kind == "pm":
+        source_urls = source_value if isinstance(source_value, list) else [source_value]
+        jst = timezone(timedelta(hours=9))
+        target = (scheduled_start or datetime.now(timezone.utc)).astimezone(jst)
+        ymd = target.strftime("%Y%m%d")
+        md_terms = (f"{target.month}/{target.day}", f"{target.month}月{target.day}日")
+        keywords = (
+            "高市", "総理", "記者会見", "会見", "演説", "国連総会",
+            "United Nations", "UNGA", "ニューヨーク",
+        )
+        gathered = []
+        used = set()
+        for source_url in source_urls:
+            source_url = str(source_url).strip()
+            if not source_url:
+                continue
+            try:
+                index = requests.get(
+                    source_url, timeout=(5, 20), headers={"User-Agent": "Mozilla/5.0"}
+                )
+                index.raise_for_status()
+                decoded = _decode_official_html(index)
+                for href, title, context in _html_links_with_context(decoded, source_url):
+                    haystack = f"{context} {title} {href}"
+                    same_day = ymd in href or any(term in haystack for term in md_terms)
+                    relevant = any(term.lower() in haystack.lower() for term in keywords)
+                    if not same_day or not relevant or href in used:
+                        continue
+                    used.add(href)
+                    try:
+                        detail = requests.get(
+                            href, timeout=(5, 25), headers={"User-Agent": "Mozilla/5.0"}
+                        )
+                        detail.raise_for_status()
+                        body = _html_to_plain(_decode_official_html(detail))
+                        if len(body) >= 100:
+                            gathered.append(f"{title}\n{body[:16000]}")
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        reference = "\n\n".join(gathered).strip()
+        return (reference, " / ".join(str(x) for x in source_urls)) if reference else ("", "")
+
+    index_url = str(source_value).strip()
     if not index_url:
         return "", ""
     response = requests.get(index_url, timeout=(5, 20), headers={"User-Agent": "Mozilla/5.0"})
@@ -1417,6 +1502,10 @@ def official_reference_watcher(video_id, person, title, scheduled_start):
         before = max(0.0, float(CONFIG.get("official_pre_live_monitor_minutes", 5)))
         after = max(1.0, float(CONFIG.get("official_pre_live_monitor_after_start_minutes", 10)))
         interval = max(30, int(CONFIG.get("official_pre_live_monitor_interval_seconds", 60)))
+        # 海外出張時の総理会見・演説は、終了後に全文が掲載されることがある。
+        if any(x in person for x in ("高市", "総理")):
+            after = max(after, 180.0)
+            interval = max(interval, 120)
         start_at = (scheduled_start or datetime.now(timezone.utc)) - timedelta(minutes=before)
         finish_at = (scheduled_start or datetime.now(timezone.utc)) + timedelta(minutes=after)
         while datetime.now(timezone.utc) < start_at:
@@ -1445,7 +1534,9 @@ def official_reference_watcher(video_id, person, title, scheduled_start):
 def ensure_official_reference_watcher(video_id, person, title, scheduled_start=None):
     if not CONFIG.get("official_pre_live_monitor_enabled", True):
         return
-    if not any(x in person for x in ("財務大臣", "財務官", "片山", "三村", "日銀", "日本銀行")):
+    if not any(x in person for x in (
+        "財務大臣", "財務官", "片山", "三村", "日銀", "日本銀行", "高市", "総理"
+    )):
         return
     with OFFICIAL_REFERENCE_WATCHERS_LOCK:
         if video_id in OFFICIAL_REFERENCE_WATCHERS:
@@ -1532,6 +1623,37 @@ def priority_channel_watcher(active, processed):
             except Exception as e:
                 print(f"⚠️ チャンネル補助監視エラー: {channel_name} ({e})")
         time.sleep(int(interval * 60))
+
+
+def priority_video_watcher(active, processed):
+    """ユーザー指定の重要LIVEを、検索APIを使わず直接確認する。"""
+    videos = CONFIG.get("priority_video_ids", {})
+    if not videos:
+        return
+    interval = 60
+    print(f"📺 指定LIVE直接監視: {len(videos)}件（{interval}秒間隔）")
+    while True:
+        for video_id, info in videos.items():
+            if video_id in active or video_id in processed:
+                continue
+            title = str(info.get("title", "重要LIVE"))
+            channel = str(info.get("channel", "首相官邸・指定LIVE直接監視"))
+            if youtube_watch_is_live(video_id):
+                print(f"📺 指定LIVEを検出: {title}")
+                item = {
+                    "id": {"videoId": video_id},
+                    "snippet": {
+                        "title": title,
+                        "description": str(info.get("person", "")),
+                        "channelTitle": channel,
+                    },
+                }
+                threading.Thread(
+                    target=process_conference,
+                    args=(item, active, processed, "live"),
+                    daemon=True,
+                ).start()
+        time.sleep(interval)
 
 
 def person_for(title, description):
@@ -3958,7 +4080,8 @@ def main():
     print("通常投稿動画: 監視対象外")
     print("見逃し配信・見逃しライブ: 監視対象外")
     print("文字起こしの手動停止: s を入力して Enter（監視は継続）")
-    print("公式資料: 財務省・日銀を会見開始5分前から1分間隔で監視")
+    print("公式資料: 財務省・日銀・首相官邸・外務省等を開始5分前から1分間隔で監視")
+    print(f"指定LIVE直接監視: {len(CONFIG.get('priority_video_ids', {}))}件")
     print("イベント日: 24時間・配信中Liveを15分間隔（予約検索は起動時のみ）")
     if CONFIG.get("enable_bessent_monitoring", False):
         print("海外主要チャンネル: 2分間隔の直接監視（検索API漏れ対策）")
@@ -3982,6 +4105,11 @@ def main():
 
     start_post_assistant_window()
     threading.Thread(target=manual_stop_listener, daemon=True).start()
+    threading.Thread(
+        target=priority_video_watcher,
+        args=(active, processed),
+        daemon=True,
+    ).start()
     if CONFIG.get("enable_bessent_monitoring", False):
         threading.Thread(
             target=priority_channel_watcher,
