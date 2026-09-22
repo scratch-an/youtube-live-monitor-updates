@@ -1,6 +1,9 @@
 import hashlib
+import difflib
+import io
 import json
 import html
+import math
 import os
 import re
 import shutil
@@ -9,9 +12,12 @@ import sys
 import threading
 import time
 import queue
+import wave
+from array import array
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 
@@ -24,12 +30,85 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.3"
+APP_VERSION = "7.4.33"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
     "youtube-live-monitor-updates/main/update_manifest.json"
 )
+
+
+def ensure_update_only_bat():
+    """同じフォルダに、更新確認だけを行うWindows用BATを用意する。"""
+    if os.name != "nt":
+        return
+    bat_path = APP_DIR / "最新版へ更新.bat"
+    content = """@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+set "APP_PY=%~dp0app.py"
+if exist "%~dp0.venv\\Scripts\\python.exe" (
+  "%~dp0.venv\\Scripts\\python.exe" "%APP_PY%" --update-only
+) else (
+  py "%APP_PY%" --update-only
+)
+echo.
+pause
+"""
+    try:
+        if not bat_path.exists() or bat_path.read_text(encoding="utf-8-sig") != content:
+            bat_path.write_text(content, encoding="utf-8-sig")
+    except OSError as e:
+        print(f"⚠️ 更新専用BATを作成できません: {e}")
+
+
+def ensure_gpu_setup_bat():
+    """GPU利用に必要なNVIDIA公式PythonライブラリのセットアップBATを用意する。"""
+    if os.name != "nt":
+        return
+    bat_path = APP_DIR / "GPU初回セットアップ.bat"
+    content = """@echo off
+setlocal
+chcp 65001 >nul
+cd /d "%~dp0"
+set "PYTHON_EXE=%~dp0.venv\\Scripts\\python.exe"
+if not exist "%PYTHON_EXE%" (
+  echo [ERROR] Virtual environment not found.
+  echo Run the normal initial setup BAT first.
+  echo.
+  pause
+  exit /b 1
+)
+echo =============================================================
+echo NVIDIA GPU runtime setup for faster-whisper
+echo Installs CUDA 12 cuBLAS and cuDNN 9 into this tool only.
+echo The download can be large and may take several minutes.
+echo =============================================================
+echo.
+"%PYTHON_EXE%" -m pip install --upgrade pip wheel
+if errorlevel 1 goto :failed
+"%PYTHON_EXE%" -m pip install --upgrade nvidia-cublas-cu12 nvidia-cudnn-cu12
+if errorlevel 1 goto :failed
+echo.
+echo [OK] NVIDIA GPU runtime setup completed.
+echo Close this window, then run the archive test again.
+echo Look for: GPU runtime test: success
+echo.
+pause
+exit /b 0
+:failed
+echo.
+echo [ERROR] NVIDIA GPU runtime setup failed.
+echo Copy everything shown in this window and send it for review.
+echo.
+pause
+exit /b 1
+"""
+    try:
+        if not bat_path.exists() or bat_path.read_text(encoding="utf-8-sig") != content:
+            bat_path.write_text(content, encoding="utf-8-sig")
+    except OSError as e:
+        print(f"⚠️ GPUセットアップBATを作成できません: {e}")
 
 
 def version_tuple(value):
@@ -166,7 +245,7 @@ def check_for_updates():
 DEFAULT_CONFIG = {
     "youtube_api_key": "",
     # 一時停止中。trueに戻すとベッセント長官のLive監視を再開する。
-    "enable_bessent_monitoring": True,
+    "enable_bessent_monitoring": False,
     # search.list は1日100回までのため、20分未満にはしない。
     # 20分間隔なら最大72回/日となり、手動テスト分も残せる。
     "scan_interval_minutes": 20,
@@ -225,13 +304,32 @@ DEFAULT_CONFIG = {
     "region_code": "JP",
     "language": "ja",
     "transcription_model": "small",
+    # GPUで日本語アーカイブを精度優先処理するときだけmediumを使う。
+    # CPUへ切り替わった場合は従来どおりsmallを使い、極端な遅延を避ける。
+    "gpu_archive_transcription_model": "medium",
+    "english_transcription_model": "medium",
+    # NVIDIA GPUを優先する。CTranslate2で初期化できない場合だけCPUへ戻す。
+    "prefer_gpu": True,
+    "gpu_device_index": 0,
+    "gpu_compute_type": "float16",
     "download_from_start": True,
     "cookies_from_browser": "",
     "keep_audio": True,
     "chunk_seconds": 20,
     "beam_size": 8,
+    # CPU版Whisperで論理コアを多めに使う。0はPCに合わせた自動設定。
+    # 全コアは占有せず、Windowsや投稿補助画面が固まらない余裕を残す。
+    "cpu_threads": 0,
+    "cpu_load_ratio": 0.75,
+    "cpu_max_threads": 8,
     "sentence_merge_max_seconds": 30,
     "speaker_labeling": True,
+    # 追加ライブラリなしの軽量な声質特徴で、既知話者間の交代を補助する。
+    # 軽量な声質推定は環境音で誤交代しやすいため、既定では使わない。
+    "voice_speaker_assist_enabled": False,
+    # 2026-09-04会見の確認済み区間から作成した片山大臣の音声プロファイル。
+    # 本文・公式問答で決めにくい場合だけ、高確信の判定を補助に使う。
+    "katayama_voice_profile_enabled": True,
     "translate_english_to_japanese": True,
     "save_english_original": True,
     # 英語原文はTXTへ保存するが、画面には日本語訳だけを表示する。
@@ -253,12 +351,23 @@ DEFAULT_CONFIG = {
     "openai_critical_output_usd_per_million": 6.00,
     "openai_request_timeout_seconds": 30,
     # 自動投稿は行わず、コピーしやすい投稿補助ウィンドウへ候補をためる。
+    "important_statement_marking": True,
     "post_assistant_enabled": True,
-    "post_assistant_max_chars": 180,
+    # 見出し・重要印・話者名・分割番号・改行を含む完成形を200文字以内にする。
+    "post_assistant_max_chars": 200,
+    # 末尾結合時もYouTube LIVEチャット用の上限を超えない。
+    "post_assistant_tail_merge_max_chars": 200,
     "post_assistant_always_on_top": True,
     "ai_post_boundary_enabled": True,
     "ai_post_min_chars": 20,
+    # 重要発言も短文だけで即確定せず、理由・方針まで少し待ってまとめる。
+    "ai_post_important_min_chars": 80,
+    # 通常の短文は同じ話題の後続文を待ってから、ひとまとまりにする。
+    # 市場に影響する重要発言は ai_post_min_chars で早めに表示する。
+    "ai_post_group_min_chars": 90,
     "ai_post_max_buffer_chars": 500,
+    # 明らかに崩れた認識文はTXTへ残すが、投稿候補には送らない。
+    "post_assistant_quality_gate_enabled": True,
     # YouTubeキーワード検索から漏れやすい海外報道チャンネルを、
     # APIクォータを使わない公式フィードで補助監視する。
     "priority_feed_interval_minutes": 2,
@@ -271,9 +380,59 @@ DEFAULT_CONFIG = {
     "default_official_speaker": "高市総理",
     "archive_official_speakers": {
         "oEqKmehjjvA": "高市総理",
-        "SmIRQKIuCEw": "片山さつき 財務大臣"
+        "SmIRQKIuCEw": "片山財務大臣",
+        "mzklpHRM4m8": "植田和男 日銀総裁",
+        "TuI4euaLfuE": "片山財務大臣",
+        "5IIG5xMJ8Ak": "片山財務大臣",
+        "BKP1wLgA3U8": "片山財務大臣"
+    },
+    # 公的機関が公開した会見概要。アーカイブ時だけ認識補正に利用する。
+    "archive_official_reference_enabled": True,
+    "archive_official_reference_urls": {
+        "TuI4euaLfuE": "https://www.mof.go.jp/public_relations/conference/my20260915.html",
+        "BKP1wLgA3U8": "https://www.mof.go.jp/public_relations/conference/my20260904.html"
+    },
+    # 予約LIVEの開始5分前から、公式資料の先行公開を1分間隔で確認する。
+    "official_pre_live_monitor_enabled": True,
+    "official_pre_live_monitor_minutes": 5,
+    "official_pre_live_monitor_interval_seconds": 60,
+    "official_pre_live_monitor_after_start_minutes": 10,
+    "official_live_source_urls": {
+        "mof": "https://www.mof.go.jp/public_relations/conference/index.html",
+        "boj": "https://www.boj.or.jp/"
     },
     "archive_speaker_ranges": {
+        "BKP1wLgA3U8": [
+            {"start": "00:00:00", "end": "00:00:21", "speaker": "記者"},
+            {"start": "00:00:21", "end": "00:05:01", "speaker": "片山財務大臣"},
+            {"start": "00:05:01", "end": "00:05:43", "speaker": "記者"},
+            {"start": "00:05:43", "end": "00:08:06", "speaker": "片山財務大臣"},
+            {"start": "00:08:06", "end": "00:08:40", "speaker": "記者"},
+            {"start": "00:08:40", "end": "00:10:59", "speaker": "片山財務大臣"},
+            {"start": "00:10:59", "end": "00:11:08", "speaker": "記者"},
+            {"start": "00:11:08", "end": "00:11:11", "speaker": "片山財務大臣"},
+            {"start": "00:11:11", "end": "00:11:30", "speaker": "記者"},
+            {"start": "00:11:30", "end": "00:12:27", "speaker": "片山財務大臣"},
+            {"start": "00:12:27", "end": "00:12:35", "speaker": "記者"},
+            {"start": "00:12:35", "end": "00:13:10", "speaker": "片山財務大臣"},
+            {"start": "00:13:10", "end": "00:13:43", "speaker": "記者"},
+            {"start": "00:13:43", "end": "00:16:30", "speaker": "片山財務大臣"},
+            {"start": "00:16:30", "end": "00:16:37", "speaker": "片山財務大臣"},
+            {"start": "00:16:37", "end": "00:17:30", "speaker": "記者"},
+            {"start": "00:17:30", "end": "00:20:29", "speaker": "片山財務大臣"},
+            {"start": "00:20:29", "end": "00:21:05", "speaker": "記者"},
+            {"start": "00:21:05", "end": "00:22:51", "speaker": "片山財務大臣"},
+            {"start": "00:22:51", "end": "00:22:56", "speaker": "記者"},
+            {"start": "00:22:56", "end": "00:23:07", "speaker": "片山財務大臣"},
+            {"start": "00:23:07", "end": "00:23:32", "speaker": "記者"},
+            {"start": "00:23:32", "end": "00:25:20", "speaker": "片山財務大臣"},
+            {"start": "00:25:20", "end": "00:26:56", "speaker": "記者"},
+            {"start": "00:26:56", "end": "00:27:44", "speaker": "片山財務大臣"},
+            {"start": "00:27:44", "end": "00:28:01", "speaker": "記者"},
+            {"start": "00:28:01", "end": "00:28:12", "speaker": "片山財務大臣"},
+            {"start": "00:28:12", "end": "00:28:18", "speaker": "記者"},
+            {"start": "00:28:18", "end": "00:28:20", "speaker": "片山財務大臣"}
+        ],
         "oEqKmehjjvA": [
             {"start": "00:19:41", "end": "00:21:00", "speaker": "記者"},
             {"start": "00:21:01", "end": "00:28:13", "speaker": "高市総理"},
@@ -281,7 +440,30 @@ DEFAULT_CONFIG = {
         ],
         "SmIRQKIuCEw": [
             {"start": "00:00:20", "end": "00:00:25", "speaker": "司会"},
-            {"start": "00:03:40", "end": "00:04:48", "speaker": "片山さつき 財務大臣"}
+            {"start": "00:03:40", "end": "00:04:48", "speaker": "片山財務大臣"}
+        ],
+        "TuI4euaLfuE": [
+            # 冒頭40秒には大臣→幹事社→大臣の切替があるため、
+            # 固定時間範囲ではなく発話内容から判定する。
+            {"start": "00:00:40", "end": "00:03:59", "speaker": "片山財務大臣"},
+            {"start": "00:04:00", "end": "00:04:37", "speaker": "記者"},
+            {"start": "00:04:38", "end": "00:06:13", "speaker": "片山財務大臣"},
+            {"start": "00:06:14", "end": "00:06:19", "speaker": "司会"},
+            {"start": "00:06:20", "end": "00:06:48", "speaker": "NHK 佐藤記者"},
+            {"start": "00:06:49", "end": "00:09:09", "speaker": "片山財務大臣"},
+            {"start": "00:09:10", "end": "00:09:32", "speaker": "ブルームバーグ 横山記者"},
+            {"start": "00:09:33", "end": "00:10:31", "speaker": "片山財務大臣"},
+            {"start": "00:10:32", "end": "00:11:06", "speaker": "読売新聞 田中記者"},
+            {"start": "00:11:07", "end": "00:12:10", "speaker": "片山財務大臣"},
+            {"start": "00:12:11", "end": "00:12:59", "speaker": "朝日新聞 長谷記者"},
+            {"start": "00:13:00", "end": "00:13:38", "speaker": "片山財務大臣"},
+            {"start": "00:13:39", "end": "00:14:12", "speaker": "記者"},
+            {"start": "00:14:13", "end": "00:14:19", "speaker": "片山財務大臣"},
+            {"start": "00:14:20", "end": "00:14:34", "speaker": "記者"},
+            {"start": "00:14:35", "end": "00:14:45", "speaker": "片山財務大臣"},
+            {"start": "00:14:46", "end": "00:14:53", "speaker": "記者"},
+            {"start": "00:14:54", "end": "00:14:58", "speaker": "片山財務大臣"},
+            {"start": "00:14:59", "end": "00:15:12", "speaker": "司会"}
         ]
     }
 }
@@ -299,6 +481,7 @@ WHISPER_PROMPT = (
     "ウォールストリート・ジャーナル、ヘッジファンド、原油価格、中東情勢、ホルムズ海峡、"
     "石油備蓄、代替調達、診療報酬改定、介護報酬改定、一般会計、新規国債発行額、公債依存度、"
     "ガソリン税、軽油引取税、物価高騰対策、"
+    "歳出改革努力、歳出及び歳入、概算要求、当初予算要求、大胆な投資、国債費、対前年度、補正予算、"
     "政策当局、独立性、ダイモン会長、同博覧会、日本の原産植物。"
 )
 
@@ -310,6 +493,7 @@ ENGLISH_WHISPER_PROMPT = (
 
 # 一般化しても危険が小さい、確認済みの崩れだけ。
 TEXT_CORRECTIONS = [
+    ("採出改革努力", "歳出改革努力"),
     ("ぶっか田駿の対応", "物価高騰対策の対応"),
     ("その来一歩", "その第一歩"),
     ("物価高屋", "物価高へ"),
@@ -320,11 +504,135 @@ TEXT_CORRECTIONS = [
     ("高位置内閣", "高市内閣"),
     ("原油加工夫", "原油確保"),
     ("臨居を変に", "臨機応変に"),
+    ("漢字社", "幹事社"),
+    ("政策権利… であります、ウタンポコールレート・オバナイトモノ", "政策金利であります、無担保コールレート（オーバーナイト物）"),
+    ("ウタンポコールレート・オバナイトモノ", "無担保コールレート（オーバーナイト物）"),
+    ("保管党在寄金制度", "補完当座預金制度"),
+    ("適用理理", "適用利率"),
+    ("基準貸付履歴", "基準貸付利率"),
 ]
 
 # 特定アーカイブでユーザーが確認した訂正。
 # 他動画へ誤適用しないよう、動画IDごとに分離する。
 VIDEO_TEXT_CORRECTIONS = {
+    "BKP1wLgA3U8": [
+        ("お閣議の記者会見", "閣議後記者会見"),
+        ("応答発言", "冒頭発言"),
+        ("当局年度予算", "令和9年度予算"),
+        ("向上的な施策", "恒常的な施策"),
+        ("このことを踏めまして", "このことを踏まえまして"),
+        ("令和8年度投資予算", "令和8年度当初予算"),
+        ("急速な危機状況", "急速な金利上昇"),
+        ("携帯外政無限の影響", "経済財政運営への影響"),
+        ("どう考えされているか", "どう考えられているか"),
+        ("多くお聞かせください", "お聞かせください"),
+        ("通年の国際発行", "通年の国債発行"),
+        ("通然の国際発行額", "通年の国債発行額"),
+        ("具体的に反射的に決まって", "具体的に決まって"),
+        ("お閣議を記者会見をいただきます", "閣議後記者会見を始めます"),
+        ("外産の方から、冒頭発見", "大臣の方から、冒頭発言"),
+        ("外産要件", "概算要求"),
+        ("令和区年度", "令和9年度"),
+        ("総勢特別措置", "租税特別措置"),
+        ("転検", "点検"),
+        ("再出改革努力", "歳出改革努力"),
+        ("改善要求の証拠", "概算要求の総額"),
+        ("改善要求", "概算要求"),
+        ("144点", "144兆円"),
+        ("ノーズバース", ""),
+        ("サイムザンダカ", "債務残高"),
+        ("対GDP費", "対GDP比"),
+        ("求めないとおります", "求められております"),
+        ("通面の国際発行額", "通年の国債発行額"),
+        ("通年の国際発行額", "通年の国債発行額"),
+        ("ジュロウオーム", "ローン"),
+        ("政府のリバーライフター", "政府の利払い負担"),
+        ("1080年のほとんど初めて", "戦後80年で初めて"),
+        ("国土共人家", "国土強靱化"),
+        ("高石のミクス", "タカイチノミクス"),
+        ("高一のミクス", "タカイチノミクス"),
+        ("ベーステント財務省間", "ベッセント財務長官"),
+        ("従庁エボール要求", "当初予算要求"),
+        ("大胆の都市", "大胆な投資"),
+        ("副事態も大きく増えた", "国債費も大きく増えた"),
+        ("実際に体験報道から", "実際に対前年度から"),
+        ("200年度予算", "令和9年度予算"),
+        ("補正予算、依存", "補正予算依存"),
+        ("向上的な支度", "恒常的な施策"),
+        ("投資予算で措置", "当初予算で措置"),
+        ("予算平成改革", "予算編成改革"),
+        ("無駄を措業とした", "無駄をそぎ落とした"),
+        ("総勢特別措置は補助金等", "租税特別措置や補助金等"),
+        ("優先注意", "優先順位"),
+        ("あらえ直し", "洗い直し"),
+        ("大胆20点化", "大胆な重点化"),
+        ("外産要求", "概算要求"),
+        ("143.1億円", "143.1兆円"),
+        ("国土共進化", "国土強靱化"),
+        ("撮影方針", "査定方針"),
+        ("市場の審議", "市場の信認"),
+        ("数年の国債発行額", "通年の国債発行額"),
+        ("AI反動体", "AI・半導体"),
+        ("予算編成家庭", "予算編成過程"),
+        ("機械費用", "機会費用"),
+        ("国公変動", "国庫返納"),
+        ("実行性", "実効性"),
+        ("成長への企業", "成長への寄与"),
+        ("費用的起用対効果", "費用対効果"),
+        ("国土強靱化などにかかる 自己要求となっております。 というが行われております。", "国土強靱化などに係る事項要求が行われております。"),
+        ("自己要求となっております。 というが行われております。", "事項要求が行われております。"),
+        ("自己要求", "事項要求"),
+        ("事項要求となっております。", "事項要求が行われております。"),
+        ("というが行われております。", ""),
+        ("補正予算の依存", "補正予算依存"),
+        ("GXAI半導体", "GX・AI・半導体"),
+        ("GX・AI半導体", "GX・AI・半導体"),
+        ("GX AI 半導体", "GX・AI・半導体"),
+        ("GX、AI、半導体", "GX・AI・半導体"),
+        ("一般会計開催要求額", "一般会計概算要求額"),
+        ("これと比較すべきは、7年度補正と 8年度投資予算", "これと比較すべきは、令和7年度補正予算と令和8年度当初予算"),
+        ("約141㎝ 1兆円", "約141兆円"),
+        ("この不年度予算", "この令和9年度予算"),
+        ("予算全般 において歳出改革努力を継続する ご覧いただきありがとうございました。", "予算全般において、歳出改革努力を継続する中で、"),
+        ("歳出改革努力を継続する ご覧いただきありがとうございました。", "歳出改革努力を継続する中で、"),
+        ("予算編成のプレステス", "予算編成プロセス"),
+        ("成長にどのぐらい寄与するか、民間投資を どのぐらい誘発できるか、誘発効果", "成長への寄与、民間投資の誘発効果"),
+        ("会見を終了します。", ""),
+        ("税収入は逆に言うと増加すると", "家計の金利収入は、逆に言うと増加すると"),
+        ("再建評価", "債券評価"),
+        ("大変取予算の新規国債の発行額", "通年の新規国債発行額"),
+        ("40兆円程度に抑えたりというような 趣旨も加減されましたけれども", "40兆円程度に抑えたいというような趣旨の発言をされましたけれども"),
+        ("今後は株上げとしても同じ日になるでしょうか", "ここは片山大臣としても同じ認識なんでしょうか"),
+        ("公園というのが出合わせになっている ということではないところなのか", "そうすると、必ずしも40兆円というのが目安になっているということではない、ということなんでしょうか。"),
+        ("あのそれがおっしゃったのは その前年度税収減 前年度税収が増えて", "あの、総理がおっしゃったのは、前年度税収が増えて"),
+        ("非常に重いので、 それが重いことであるということは", "非常に重いことであると"),
+        ("NHKの方お願いします NHKの佐藤と申しましょう 本会の公明での別戦と財務長さんと 個別の会談について", "NHKの方、お願いします。NHKの佐藤と申します。今回の訪米でのベッセント財務長官との個別の会談について伺えればと思います。"),
+        ("会談の状況との大臣の受け止め", "会談の状況と、大臣の受け止め"),
+        ("ベッセンと 長官", "ベッセント長官"),
+        ("ベッセンと長官", "ベッセント長官"),
+        ("エンドオース", "エンドース"),
+        ("日国の財務長官", "一国の財務長官"),
+        ("合わすべきだとか", "ああすべきだとか"),
+        ("上田総裁", "植田総裁"),
+        ("今回私がお会いする前に 前の黒田総裁", "今回、私がお会いする前にお会いになっていますし、前の黒田総裁"),
+        ("バンキー社さん", "番記者さん"),
+        ("自論ですよね", "持論ですよね"),
+        ("持論ですよね ただそれを", "持論ですよね。ただ、それを……"),
+        ("1日中のプレスカンフェンス", "1日のプレスカンファレンス"),
+        ("全州、アベノイクスについてくれた流れで、 全州ラクシュー、レッツアダウン、アンドストップ、 リフレンション", "“We've talked to the Japanese”というところで、アベノミクスについて触れた流れで、“They should actually let that run and stop the reflation.”"),
+        ("長津何日に", "何月何日に"),
+        ("その詳細との会話", "総裁との会話"),
+        ("もともとの実績として", "もともとの持説として"),
+        ("最初のスタート自身が", "最初にスタートしたのが"),
+        ("李教編", "臨機応変"),
+        ("考えの人だからですし", "考えの人ですし"),
+        ("物言が慎重", "物言いが慎重"),
+        ("ので、 ので、", "ので、"),
+        ("逃げる論", "二元論"),
+        ("リフレー制作", "リフレ政策"),
+        ("これらはアベノミクスにおいて", "彼らはアベノミクスにおいて"),
+        ("今はそれを終えて、リフレ政策を", "今はそれを終えて、そして、そのリフレ政策を"),
+    ],
     "oEqKmehjjvA": [
         ("ホルムズ会計", "ホルムズ海峡"),
         ("長達", "調達"),
@@ -373,7 +681,235 @@ VIDEO_TEXT_CORRECTIONS = {
         ("独立性が起こっておかれるべき", "独立性が確保されるべき"),
         ("政策統計", "政策当局"),
         ("大盟会長", "ダイモン会長"),
-    ]
+    ],
+    "EcNJBAsZgY8": [
+        ("朝代委員", "浅田委員"),
+        ("生存食用の属、消費者物価", "生鮮食品を除く消費者物価"),
+        ("生存食用の属", "生鮮食品を除く"),
+        ("2%をしたまわる", "2％を下回る"),
+        ("経済の状況も患者も強くは強いとは言えない", "経済の状況も必ずしも強いとは言えない"),
+    ],
+    "mzklpHRM4m8": [
+        ("生田数で決定しました", "賛成多数で決定しました"),
+        ("内容を完結にする", "内容を簡潔にする"),
+        ("市会社から指名", "司会者から指名"),
+        ("拒守したまま", "挙手したまま"),
+        ("政策禁理", "政策金利"),
+        ("オタンプコールレート、終わらないともの", "無担保コールレート（オーバーナイト物）の"),
+        ("保管等材料金制度", "補完当座預金制度"),
+        ("適用値率", "適用利率"),
+        ("基準化し付け値率", "基準貸付利率"),
+        ("朝代委員", "浅田委員"),
+        ("生成食品を除く", "生鮮食品を除く"),
+        ("患者も強くは強いとは", "必ずしも強いとは"),
+        ("市場調整、金融市場調整創新を据え起く", "金融市場調節方針を据え置く"),
+        ("このタイミングでの売り上げ", "このタイミングでの利上げ"),
+        ("気候変度対オープニッシュ", "気候変動対応オペ"),
+        ("金融調節の円滑な上", "金融調節の円滑な運営"),
+        ("休関点から貸付権利", "観点から貸付金利"),
+        ("全日で決定", "全員一致で決定"),
+        ("枠の景気", "わが国の景気"),
+        ("さっき行き", "先行き"),
+        ("各種製作等", "各種政策等"),
+        ("経済を下座さえ", "経済を下支え"),
+        ("かわせへんやす", "為替円安"),
+        ("前半日で高いのみ", "前年比で高い伸び"),
+        ("核上昇発力", "価格上昇圧力"),
+        ("吐き押し始め", "波及し始め"),
+        ("地域上昇", "賃金上昇"),
+        ("販売核への転換", "販売価格への転嫁"),
+        ("プラスサブ", "プラス幅"),
+        ("予想ぶっかじょう 産業省率", "予想物価上昇率"),
+        ("貴重的な上昇率", "基調的な上昇率"),
+        ("ワークニーの経済物価", "わが国の経済・物価"),
+        ("大胸沿って推じ", "概ね沿って推移"),
+        ("リアキペース", "利上げペース"),
+        ("タイミングレート", "ターミナルレート"),
+        ("中立近利", "中立金利"),
+        ("春刀", "春闘"),
+        ("ベッセント長官との改弾", "ベッセント長官との会談"),
+        ("日本の長勤理", "日本の長期金利"),
+        ("延安", "円安"),
+        ("高田町議員", "高田審議委員"),
+        ("ボードメーバー", "ボードメンバー"),
+        ("行為形成", "合意形成"),
+        ("カワセレット", "為替レート"),
+        ("集焼技術格差", "金利差"),
+        ("ご対策ください", "ご退席ください"),
+    ],
+    "TuI4euaLfuE": [
+        ("飲食利用品消費成立", "飲食料品消費税率"),
+        ("修行者負担軽減支援金", "就業者負担軽減支援金"),
+        ("本対抗", "本大綱"),
+        ("コンパンの対抗", "今般の大綱"),
+        ("閣府議決定", "閣議決定"),
+        ("飲食料費に係る消費成立", "飲食料品に係る消費税率"),
+        ("医療費に係る消費税", "飲食料品に係る消費税"),
+        ("本速課税事業者", "免税事業者が課税事業者"),
+        ("農林業業者", "農林漁業者"),
+        ("個別の売上だか", "個別の売上高"),
+        ("資金振り支援", "資金繰り支援"),
+        ("予算編成課程", "予算編成過程"),
+        ("特例交際", "特例公債"),
+        ("特例交差", "特例公債"),
+        ("素材特別措置", "租税特別措置"),
+        ("再出及び再入", "歳出及び歳入"),
+        ("区議において", "閣議において"),
+        ("胸のご発言", "旨の御発言"),
+        ("八方自治体", "地方自治体"),
+        ("周知候補", "周知、広報"),
+        ("第3時に国間通貨スワープ", "第3次二国間通貨スワップ"),
+        ("金融協力の進化", "金融協力の深化"),
+        ("ディザイム省", "財務省"),
+        ("市場の不信任", "市場の信認"),
+        ("市場の新人", "市場の信認"),
+        ("万全を築く", "万全を期す"),
+        ("卓球的速やかにこうする", "可及的速やかに講ずる"),
+        ("定年に望んで", "丁寧に臨んで"),
+        ("食料費用消費減税", "食料品の消費税減税"),
+        ("サイモザンダ化の大GDPG", "債務残高の対GDP比"),
+        ("市場の森林確保", "市場の信認確保"),
+        ("採出、採入、両面", "歳出・歳入両面"),
+        ("再出再入道弁", "歳出・歳入両面"),
+        ("税収同行", "税収動向"),
+        ("対GDP比を安定的に仕上げていく", "対GDP比を安定的に引き下げていく"),
+        ("財政規模この中", "財政規模、この中"),
+        ("特に応じたきめ細かな給付", "所得に応じたきめ細かな給付"),
+        ("消費税率引き下げの実習", "消費税率引下げの実施"),
+        ("歳出及び歳入前般", "歳出及び歳入全般"),
+        ("史上の信任", "市場の信認"),
+        ("素税特別措置", "租税特別措置"),
+        ("真に金融性の高い", "真に緊要性の高い"),
+        ("同博の予算", "多額の予算"),
+        ("当生予算", "補正予算"),
+        ("予算編成プレッセス", "予算編成プロセス"),
+        ("財務残高の対策、 GDP", "債務残高の対GDP比"),
+        ("国際発行額", "国債発行額"),
+        ("受税県税の再現", "消費税減税の財源"),
+        ("不可持国債", "赤字国債"),
+        ("資金が退留", "資金が滞留"),
+        ("全部見仕上げる", "全部召し上げる"),
+        ("法律業界への手術", "小売業界への周知"),
+        ("総務省とか計算省", "総務省とか経産省"),
+        ("根下げ", "値下げ"),
+        ("沖縄進行予算", "沖縄振興予算"),
+        ("挽のせ", "上乗せ"),
+        ("さつびら", "札びら"),
+        ("処置しておりません", "承知しておりません"),
+        # 7.4.15と比較用文字起こしの照合で確認した崩れ。
+        ("関する対抗", "関する大綱"),
+        ("政策改正対抗", "政策改正大綱"),
+        ("税制改正対抗", "税制改正大綱"),
+        ("対抗に基づいて", "大綱に基づいて"),
+        ("今日、対抗で", "今日の大綱で"),
+        ("通貨スワップ契約に証明", "通貨スワップ契約に署名"),
+        ("協力分析", "協力覚書"),
+        ("金融協力の深化にする", "金融協力の深化に資する"),
+        ("食料品の消費税減税の大きな話もらいました", "食料品の消費税減税について、今、大臣からお話がありました"),
+        ("財源の確保について見方います", "財源の確保について伺います"),
+        ("このコッシー", "この骨子"),
+        ("さゆる見直し", "あらゆる見直し"),
+        ("財政規模というものを制裁", "財政規模というものを精査"),
+        ("市場の信認確保に配置", "市場の信認確保に配意"),
+        ("さらなる再入確保", "さらなる歳入確保"),
+        ("形状してきている", "計上してきている"),
+        ("ふっかたが対策", "物価高対策"),
+        ("予算衛生改革", "予算編成改革"),
+        ("自己要求", "事項要求"),
+        ("様々な特化への活用", "様々な特会の活用"),
+        ("補助金、外国の見直し", "補助金等の見直し"),
+        ("適切に適切な周知", "適宜、適切な周知"),
+        ("まほとり申し訳ございません", "誠に申し訳ございません"),
+        ("県内にある消費税率", "飲食料品に係る消費税率"),
+        ("速やかに返す", "速やかに開始する"),
+        ("市場の信任", "市場の信認"),
+        ("総額表示義務の 消費税率の引き下げ", "総額表示義務の特例などを設けることとしています。消費税率の引き下げ"),
+        ("事業者等への広報活動を受けます。", "事業者等への広報活動を"),
+        ("活動を速やかに開始するとともに", "速やかに開始するとともに"),
+        ("これらの取組が、両国の貿易投資関係の更なる発展や、金融協力の深化につながるとともに、現地通貨", "現地通貨"),
+        ("施策の着実な具体化。 今後は、実行に取り組んで", "施策の着実な具体化・実行に取り組んで"),
+        ("長期経費が一応上昇", "長期金利が一部上昇"),
+        ("あらかみで", "改めて"),
+        ("防衛費が増殖", "防衛費が増額"),
+        ("財源が、財政の影響論のような感じか教えてください", "財源や財政への影響をどのようにお考えでしょうか"),
+        ("その合言について", "その報道について"),
+        ("それを防発", "それを暴発"),
+        ("安控とロール", "アンコントロール"),
+        ("通念の 国債発行額", "通年の国債発行額"),
+        ("範囲するレベル", "配慮するレベル"),
+        ("数年の国債発行額", "通年の国債発行額"),
+        ("修行者、負担、軽減支援金", "就業者負担軽減支援金"),
+        # 7.4.17の40秒認識テストで確認した崩れ。
+        ("それで、誰に冒頭行わせられませんでしょうか", "それでは大臣、冒頭、発言ありますでしょうか"),
+        ("先の主員選", "先の衆院選"),
+        ("ぶっかだ化対策", "物価高対策"),
+        ("含みの期待", "国民の期待"),
+        ("副国された一項", "確認された一方"),
+        ("約半年におよそ副国会議", "約半年にわたる国民会議"),
+        ("議論が行っていなが", "議論を経ても、なお"),
+        ("政策公開の疑問", "政策効果への疑問"),
+        ("農業や外食産業などの悪意", "農業や外食産業などへの悪影響"),
+        ("税率を持つことは、戻すことは", "また2年間の税率引下げを元に戻すことは"),
+        ("税制改正大綱の確立決定は行われました", "大綱を閣議決定されました"),
+        ("日曜日で1時の時", "野党系知事の時"),
+        ("自民党刑後 これを知事に変わったときに", "自民党系の知事に変わった途端に"),
+        ("同額するというのは", "増額するというのは"),
+        ("サベス的、大量", "差別的な対応"),
+        ("大臣は考えにならない", "大臣はお考えにならない"),
+        ("一般のでもいい", "一般論でもいい"),
+        ("雇計の知事", "野党系の知事"),
+        ("上乗せ下がれる", "増額される"),
+        ("問題あると対応", "問題のある対応"),
+        ("県民支援分の田中", "読売新聞の田中"),
+        ("小遺跡の財政の話", "消費税減税の話"),
+        ("受税県税の財源", "財源"),
+        ("大陸の示される時期", "具体的に示される時期"),
+        ("当たられてお伺い", "改めて伺い"),
+        ("赤字国債に対らない", "赤字国債には頼らない"),
+        ("赤字国債は遅くなってあれば", "赤字国債を発行するのであれば"),
+        ("意見も一致でございます", "意見も一部にございます"),
+        ("万全を起す", "万全を期す"),
+        ("資金グリ支援", "資金繰り支援"),
+        ("支援内容を舞台化", "支援内容を具体化"),
+        # 財務省公式会見概要（令和8年9月15日）との照合で確認。
+        ("飲食料費に係る", "飲食料品に係る"),
+        ("広報活動を受けられます", "広報活動を速やかに開始します"),
+        ("活動を速やかに回収", "速やかに開始"),
+        # 7.4.23・片山財務大臣会見（5IIG5xMJ8Ak）で確認した崩れ。
+        ("責任やる積極財政", "責任ある積極財政"),
+        ("高石のミクス", "タカイチノミクス"),
+        ("高市のミクス", "タカイチノミクス"),
+        ("財務残択の退治GP費用", "債務残高の対GDP比"),
+        ("財務残渡課と退治GP費用", "債務残高の対GDP比"),
+        ("サイム・ザンダが対GDP費", "債務残高の対GDP比"),
+        ("個人向け国際", "個人向け国債"),
+        ("飲食料費、飲食費税率", "飲食料品の消費税率"),
+        ("飲食料費、消費税率", "飲食料品の消費税率"),
+        ("修行者負担軽減支援金", "就業者負担軽減支援金"),
+        ("修行者、負担軽減支援金", "就業者負担軽減支援金"),
+        ("通電の国際発行額", "通年の国債発行額"),
+        ("コネブト2026", "骨太の方針2026"),
+        ("宴外会", "円買い介入"),
+        ("プレスデリース", "プレスリリース"),
+        ("金融中解機能", "金融仲介機能"),
+        ("金融推立戦略", "金融戦略"),
+        ("第3時に国管通貨スワップ", "第3次二国間通貨スワップ"),
+        ("協力を具合書", "協力覚書"),
+        ("事態務省", "財務省"),
+        ("金融協力の深化にする", "金融協力の深化に資する"),
+        ("今般の対抗", "今般の大綱"),
+        ("市場の審認", "市場の信認"),
+        ("法案に守り込んで", "法案に盛り込んで"),
+        ("丁寧に望んで", "丁寧に臨んで"),
+        ("修業者負担軽減支援金", "就業者負担軽減支援金"),
+        ("このことを 生まれて", "このことを踏まえて"),
+        ("避散文書", "3文書"),
+        ("その合同について", "その報道について"),
+        ("お答えできたねます", "お答えできかねます"),
+        ("適当的説に", "適宜適切に"),
+        ("査定化されて", "査定がされて"),
+        ("寝下げ", "値下げ"),
+    ],
 }
 
 def load_config():
@@ -414,6 +950,14 @@ def load_config():
     channels = dict(DEFAULT_CONFIG.get("priority_channel_ids", {}))
     channels.update(cfg.get("priority_channel_ids", {}))
     out["priority_channel_ids"] = channels
+    # 旧config.jsonの辞書で、新版に追加した対象者・動画設定を消さない。
+    for key in (
+        "archive_official_speakers", "archive_speaker_ranges",
+        "archive_official_reference_urls",
+    ):
+        merged_mapping = dict(DEFAULT_CONFIG.get(key, {}))
+        merged_mapping.update(cfg.get(key, {}))
+        out[key] = merged_mapping
     return out
 
 
@@ -422,6 +966,11 @@ CONFIG = load_config()
 # 配信中の文字起こしを、監視プログラムを閉じずに手動停止するための管理表。
 ACTIVE_TRANSCRIPTIONS = {}
 ACTIVE_TRANSCRIPTIONS_LOCK = threading.Lock()
+# 予約LIVE前に発見した財務省・日銀の公式本文。LIVE処理中も更新を参照する。
+LIVE_OFFICIAL_REFERENCES = {}
+LIVE_OFFICIAL_REFERENCES_LOCK = threading.Lock()
+OFFICIAL_REFERENCE_WATCHERS = set()
+OFFICIAL_REFERENCE_WATCHERS_LOCK = threading.Lock()
 EVENT_SCHEDULE_CACHE = {
     "checked_at": 0.0,
     "date": "",
@@ -679,6 +1228,236 @@ def search_upcoming():
     return search_event("upcoming")
 
 
+def scheduled_start_for_video(video_id):
+    """予約LIVEの開始予定時刻をYouTube videos.listから取得する。"""
+    try:
+        data = api_get("videos", {
+            "part": "liveStreamingDetails",
+            "id": video_id,
+        })
+        items = data.get("items", [])
+        value = str(
+            items[0].get("liveStreamingDetails", {}).get("scheduledStartTime", "")
+            if items else ""
+        ).strip()
+        if not value:
+            return None
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception as e:
+        print(f"⚠️ 予約LIVE開始時刻を取得できません ({video_id}): {e}")
+        return None
+
+
+def _html_to_plain(source):
+    source = re.sub(r"(?is)<(?:script|style).*?>.*?</(?:script|style)>", " ", source)
+    source = html.unescape(re.sub(r"(?s)<[^>]+>", "\n", source))
+    source = re.sub(r"[\t\r ]+", " ", source)
+    return re.sub(r"\n+", "\n", source).strip()
+
+
+def _decode_official_html(response):
+    """官公庁ページを、宣言漏れや誤ったcharsetがあっても日本語で復元する。"""
+    raw = response.content
+    declared = str(getattr(response, "encoding", "") or "").strip()
+    apparent = str(getattr(response, "apparent_encoding", "") or "").strip()
+    encodings = ["utf-8-sig", declared, apparent, "cp932", "shift_jis", "euc_jp"]
+    candidates = []
+    used = set()
+    for encoding in encodings:
+        key = encoding.lower().replace("_", "-") if encoding else ""
+        if not key or key in used:
+            continue
+        used.add(key)
+        try:
+            decoded = raw.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+        score = sum(
+            decoded.count(marker) * weight
+            for marker, weight in (
+                ("冒頭発言", 100), ("質疑応答", 80), ("（以上）", 60),
+                ("財務省", 20), ("記者会見", 20),
+            )
+        )
+        score += len(re.findall(r"[ぁ-んァ-ヶ一-龠]", decoded[:50000]))
+        candidates.append((score, decoded, encoding))
+    if not candidates:
+        raise RuntimeError("公式ページの文字コードを判定できません")
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def _official_error_summary(error):
+    """公式資料取得は、利用者が原因を判断できる範囲で詳細を表示する。"""
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if status:
+        return f"HTTP {status} ({type(error).__name__})"
+    detail = re.sub(r"https?://\S+", "[URL]", str(error)).strip()
+    if detail:
+        return f"{type(error).__name__}: {detail[:240]}"
+    return type(error).__name__
+
+
+def _html_links(source, base_url):
+    links = []
+    for match in re.finditer(
+        r"(?is)<a\b[^>]*href\s*=\s*['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        source,
+    ):
+        href = urljoin(base_url, html.unescape(match.group(1)).strip())
+        title = re.sub(r"\s+", " ", _html_to_plain(match.group(2))).strip()
+        if href and title:
+            links.append((href, title))
+    return links
+
+
+def _html_links_with_context(source, base_url):
+    """リンク直前の日付表示も含めて日銀新着情報を判定する。"""
+    links = []
+    for match in re.finditer(
+        r"(?is)<a\b[^>]*href\s*=\s*['\"]([^'\"]+)['\"][^>]*>(.*?)</a>",
+        source,
+    ):
+        href = urljoin(base_url, html.unescape(match.group(1)).strip())
+        title = re.sub(r"\s+", " ", _html_to_plain(match.group(2))).strip()
+        context = re.sub(
+            r"\s+", " ", _html_to_plain(source[max(0, match.start() - 240):match.start()])
+        ).strip()
+        if href and title:
+            links.append((href, title, context[-120:]))
+    return links
+
+
+def _extract_pdf_text(content):
+    """pypdfが利用可能な環境では日銀PDF本文も補正資料にする。"""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(content))
+        return "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+    except Exception:
+        return ""
+
+
+def discover_live_official_reference(person, scheduled_start):
+    """当日公開された財務省会見概要または日銀資料を探す。"""
+    sources = CONFIG.get("official_live_source_urls", {})
+    if "日銀" in person or "日本銀行" in person:
+        kind = "boj"
+    elif any(x in person for x in ("財務大臣", "財務官", "片山", "三村")):
+        kind = "mof"
+    else:
+        return "", ""
+
+    index_url = str(sources.get(kind, "")).strip()
+    if not index_url:
+        return "", ""
+    response = requests.get(index_url, timeout=(5, 20), headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+    links = _html_links(_decode_official_html(response), index_url)
+    jst = timezone(timedelta(hours=9))
+    target = (scheduled_start or datetime.now(timezone.utc)).astimezone(jst)
+    ymd = target.strftime("%Y%m%d")
+    md_terms = (f"{target.month}/{target.day}", f"{target.month}月{target.day}日")
+
+    if kind == "mof":
+        candidates = [
+            (href, title) for href, title in links
+            if "/public_relations/conference/" in href
+            and href.endswith(".html")
+            and (ymd in href or any(term in title for term in md_terms))
+        ]
+        for href, title in candidates[:5]:
+            detail = requests.get(href, timeout=(5, 20), headers={"User-Agent": "Mozilla/5.0"})
+            detail.raise_for_status()
+            plain = _html_to_plain(_decode_official_html(detail))
+            start = plain.find("冒頭発言")
+            end = plain.find("（以上）", start)
+            if start >= 0:
+                if end < 0:
+                    end = min(len(plain), start + 20000)
+                body = plain[start:end].strip()
+                if len(body) >= 200:
+                    return body, href
+        return "", ""
+
+    keywords = (
+        "金融市場調節方針", "金融政策決定会合", "総裁記者会見",
+        "記者会見", "展望レポート", "補完当座預金制度", "金利",
+    )
+    candidates = []
+    for href, title, context in _html_links_with_context(response.text, index_url):
+        if not any(term in f"{context} {title}" for term in md_terms):
+            continue
+        if any(keyword in title for keyword in keywords):
+            candidates.append((href, title))
+    gathered = []
+    used_urls = []
+    for href, title in candidates[:8]:
+        if href in used_urls:
+            continue
+        used_urls.append(href)
+        try:
+            detail = requests.get(href, timeout=(5, 25), headers={"User-Agent": "Mozilla/5.0"})
+            detail.raise_for_status()
+            content_type = str(detail.headers.get("Content-Type", "")).lower()
+            if href.lower().endswith(".pdf") or "application/pdf" in content_type:
+                body = _extract_pdf_text(detail.content)
+            else:
+                body = _html_to_plain(_decode_official_html(detail))
+            gathered.append(f"{title}\n{body[:12000]}".strip())
+        except Exception:
+            gathered.append(title)
+    reference = "\n\n".join(x for x in gathered if x).strip()
+    return (reference, index_url) if len(reference) >= 30 else ("", "")
+
+
+def official_reference_watcher(video_id, person, title, scheduled_start):
+    """開始5分前から公式ページを1分間隔で確認し、LIVE補正へ渡す。"""
+    try:
+        before = max(0.0, float(CONFIG.get("official_pre_live_monitor_minutes", 5)))
+        after = max(1.0, float(CONFIG.get("official_pre_live_monitor_after_start_minutes", 10)))
+        interval = max(30, int(CONFIG.get("official_pre_live_monitor_interval_seconds", 60)))
+        start_at = (scheduled_start or datetime.now(timezone.utc)) - timedelta(minutes=before)
+        finish_at = (scheduled_start or datetime.now(timezone.utc)) + timedelta(minutes=after)
+        while datetime.now(timezone.utc) < start_at:
+            time.sleep(min(30, max(1, int((start_at - datetime.now(timezone.utc)).total_seconds()))))
+        print(f"🏛 公式資料の事前監視開始: {person}（開始{before:g}分前から）")
+        previous = ""
+        while datetime.now(timezone.utc) <= finish_at:
+            try:
+                reference, source_url = discover_live_official_reference(person, scheduled_start)
+                if reference and reference != previous:
+                    previous = reference
+                    with LIVE_OFFICIAL_REFERENCES_LOCK:
+                        LIVE_OFFICIAL_REFERENCES[video_id] = {
+                            "text": reference,
+                            "url": source_url,
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        }
+                    print(f"🏛 公式資料を検出・補正に使用: {source_url}（{len(reference)}文字）")
+            except Exception as e:
+                print(f"⚠️ 公式資料の事前監視エラー: {_official_error_summary(e)}")
+            time.sleep(interval)
+    finally:
+        print(f"🏛 公式資料の事前監視終了: {person}")
+
+
+def ensure_official_reference_watcher(video_id, person, title, scheduled_start=None):
+    if not CONFIG.get("official_pre_live_monitor_enabled", True):
+        return
+    if not any(x in person for x in ("財務大臣", "財務官", "片山", "三村", "日銀", "日本銀行")):
+        return
+    with OFFICIAL_REFERENCE_WATCHERS_LOCK:
+        if video_id in OFFICIAL_REFERENCE_WATCHERS:
+            return
+        OFFICIAL_REFERENCE_WATCHERS.add(video_id)
+    threading.Thread(
+        target=official_reference_watcher,
+        args=(video_id, person, title, scheduled_start),
+        daemon=True,
+    ).start()
+
+
 def youtube_watch_is_live(video_id):
     """検索APIを使わず、動画ページの現在Liveフラグを確認する。"""
     try:
@@ -873,6 +1652,17 @@ def repetition_score(text):
 
 
 def looks_hallucinated(text):
+    # 英語の長い文や二文一組の反復も検出する。
+    sentences = [re.sub(r"\s+", " ", x).strip().casefold()
+                 for x in re.split(r"[。！？.!?]+", text) if x.strip()]
+    from collections import Counter
+    counts = Counter(x for x in sentences if len(x) >= 20)
+    if any(count >= 4 for count in counts.values()):
+        return True
+    # 「I'm a heart surgeon.」等、20文字未満の英文反復も検出。
+    short_counts = Counter(x for x in sentences if len(x) >= 8 and len(x.split()) >= 3)
+    if any(count >= 6 for count in short_counts.values()):
+        return True
     score = repetition_score(text)
     if score >= 0.45:
         return True
@@ -1007,6 +1797,203 @@ def response_output_text(payload):
     return "".join(pieces).strip()
 
 
+_OFFICIAL_REFERENCE_WARNED = set()
+
+
+def fetch_official_archive_reference(video_id, out_dir=None):
+    """財務省などの公式会見概要を取得し、本文だけを参照用に整形する。"""
+    if not CONFIG.get("archive_official_reference_enabled", True):
+        return ""
+    url = str(CONFIG.get("archive_official_reference_urls", {}).get(video_id, "")).strip()
+    if not url:
+        return ""
+    try:
+        response = requests.get(
+            url,
+            timeout=(5, 20),
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+        source = _html_to_plain(_decode_official_html(response))
+        start = source.find("冒頭発言")
+        end = source.find("（以上）", start)
+        if start < 0:
+            raise RuntimeError("公式ページに冒頭発言がありません")
+        if end < 0:
+            end = min(len(source), start + 20000)
+        reference = source[start:end].strip()
+        if len(reference) < 200:
+            raise RuntimeError("公式本文が短すぎます")
+        if out_dir is not None:
+            (Path(out_dir) / "財務省公式会見概要_参照用.txt").write_text(
+                f"参照元: {url}\n\n{reference}\n", encoding="utf-8"
+            )
+        print(f"🏛 財務省公式会見概要: 読み込み済み（{len(reference)}文字）")
+        return reference
+    except Exception as e:
+        print(f"⚠️ 公式会見概要を取得できないため通常認識を続けます: {_official_error_summary(e)}")
+        return ""
+
+
+def build_official_reference_state(reference, official_speaker):
+    """公式本文を進行順の短い問答単位にし、照合位置を保持する。"""
+    units = []
+    speaker = official_speaker
+    # 財務省ページの「問）」「答）」を残したまま分割する。
+    chunks = re.split(r"(?=(?:問|答)[）)])", str(reference))
+    for chunk in chunks:
+        chunk = re.sub(r"^〖[^〗]+〗\s*", "", chunk).strip()
+        if not chunk:
+            continue
+        if re.match(r"^問[）)]", chunk):
+            speaker = "記者"
+            chunk = re.sub(r"^問[）)]\s*", "", chunk)
+        elif re.match(r"^答[）)]", chunk):
+            speaker = official_speaker
+            chunk = re.sub(r"^答[）)]\s*", "", chunk)
+        # 長い回答も句点単位にする。前後をまとめて照合できるよう話者は保持する。
+        for sentence in re.split(r"(?<=[。！？])\s*", chunk):
+            sentence = sentence.strip()
+            if len(sentence) >= 8:
+                units.append((speaker, sentence))
+    return {"units": units, "cursor": 0}
+
+
+def select_official_reference(text, state):
+    """現在位置付近から最も近い公式文を選び、問答ラベルも返す。"""
+    if not state or not state.get("units"):
+        return "", None
+    source = re.sub(r"[\s、。！？!?・]", "", str(text))
+    cursor = int(state.get("cursor", 0))
+    units = state["units"]
+    best = (0.0, cursor, cursor, None, "")
+    # 少しだけ後戻りを許し、先の20文までを探索。1～4文の窓で比較する。
+    for start in range(max(0, cursor - 1), min(len(units), cursor + 12)):
+        speaker = units[start][0]
+        combined = ""
+        for end in range(start, min(len(units), start + 5)):
+            if units[end][0] != speaker:
+                break
+            combined += units[end][1]
+            target = re.sub(r"[\s、。！？!?・]", "", combined)
+            score = difflib.SequenceMatcher(None, source, target).ratio()
+            # 長さが大きく違う候補を選びにくくする。
+            length_fit = min(len(source), len(target)) / max(1, max(len(source), len(target)))
+            score = score * (0.65 + 0.35 * length_fit)
+            if score > best[0]:
+                best = (score, start, end, speaker, combined)
+    # 低い類似度でカーソルを進めると、冒頭発言の途中で最初の
+    # 「問）」へ飛び、以後の大臣発言を記者と誤表示する。
+    if best[0] < 0.34:
+        return "", None
+    state["cursor"] = max(cursor, best[2] + 1)
+    return best[4], best[3]
+
+
+def correct_with_official_reference(text, reference):
+    """アーカイブ認識を公式概要と照合。失敗・不一致時は必ず原文へ戻す。"""
+    original = re.sub(r"\s+", " ", str(text)).strip()
+    if not reference or len(original) < 40:
+        return original
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key or remaining_openai_budget_jpy() < 5.0:
+        return original
+    instructions = (
+        "あなたは日本の官公庁会見の校閲者です。音声認識文を、公式会見概要の一致する箇所だけを根拠に訂正してください。"
+        "固有名詞、数字、金融・財政用語、同音異義語、脱落した短い語句を直します。"
+        "公式概要は逐語録とは限らないため、認識文にない別の質問や回答を追加せず、要約・意見・説明もしません。"
+        "話者名、問）、答）、Markdown、引用符を付けず、訂正後の本文だけを出力してください。"
+        "一致箇所を判断できなければ、音声認識文を一字も変えず返してください。"
+    )
+    payload = {
+        "model": str(CONFIG.get("openai_model", "gpt-5.6-luna")),
+        "instructions": instructions,
+        "input": json.dumps(
+            {
+                "audio_transcription": original,
+                "official_reference": reference[:16000],
+            },
+            ensure_ascii=False,
+        ),
+        "max_output_tokens": 1400,
+    }
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=max(15, int(CONFIG.get("openai_request_timeout_seconds", 30))),
+        )
+        response.raise_for_status()
+        data = response.json()
+        usage_data = data.get("usage", {})
+        record_openai_usage(
+            usage_data.get("input_tokens", 0), usage_data.get("output_tokens", 0),
+            model=str(CONFIG.get("openai_model", "gpt-5.6-luna")),
+        )
+        corrected = re.sub(r"\s+", " ", response_output_text(data)).strip()
+        corrected = re.sub(r"^```(?:text)?\s*|\s*```$", "", corrected, flags=re.I)
+        if (
+            not corrected
+            or re.search(r"(?:^|\s)(?:問|答)[）)]", corrected)
+            or "Markdown" in corrected
+        ):
+            return original
+        ratio = len(corrected) / max(1, len(original))
+        if not 0.55 <= ratio <= 1.8:
+            return original
+        if corrected != original:
+            print(f"🏛 公式概要で認識補正: {original[:28]} → {corrected[:28]}")
+        return corrected
+    except Exception as e:
+        key = _translation_error_summary(e)
+        if key not in _OFFICIAL_REFERENCE_WARNED:
+            _OFFICIAL_REFERENCE_WARNED.add(key)
+            print(f"⚠️ 公式概要による認識補正を使えないため通常結果を使用: {key}")
+        return original
+
+
+
+def important_statement_marker(text, speaker=None):
+    """為替相場を動かし得る具体的な政策発言だけを厳格に抽出する。"""
+    if not CONFIG.get("important_statement_marking", True):
+        return ""
+    if speaker and any(x in str(speaker) for x in ("記者", "司会", "質問")):
+        return ""
+    t = str(text).casefold()
+    if re.search(r"(?:ですか|ますか|でしょうか|[？?])\s*$", t):
+        return ""
+    # 予算・国債・一般的な金利影響は、相場材料になり得ても〇の対象外。
+    intervention = any(x in t for x in (
+        "為替介入", "協調介入", "介入も辞さ", "介入を実施",
+        "intervention", "coordinated intervention",
+    ))
+    strong_fx_view = (
+        any(x in t for x in ("為替", "円安", "円高", "exchange rate", " yen"))
+        and any(x in t for x in (
+            "過度", "一方的", "投機的", "断固たる", "あらゆる手段",
+            "水準", "過小評価", "過大評価", "excessive", "one-sided",
+            "speculative", "undervalued", "overvalued",
+        ))
+    )
+    monetary_change = (
+        any(x in t for x in (
+            "政策金利", "利上げ", "利下げ", "金融政策", "量的引き締め",
+            "rate hike", "rate cut", "monetary policy", "quantitative tightening",
+        ))
+        and any(x in t for x in (
+            "決定", "変更", "引き上げ", "引き下げ", "停止", "再開",
+            "実施", "検討", "時期", "見通し", "必要", "適切",
+            "decid", "change", "raise", "lower", "stop", "resume",
+            "will", "should", "necessary", "appropriate",
+        ))
+    )
+    return "〇 " if (intervention or strong_fx_view or monetary_change) else ""
+
+
 def is_critical_finance_text(text):
     """誤訳の影響が大きい金融発言を上位モデルへ振り分ける。"""
     t = str(text).casefold()
@@ -1023,7 +2010,7 @@ def is_critical_finance_text(text):
     return bool(re.search(r"\d", t)) or any(term in t for term in terms)
 
 
-def openai_translate_finance(text):
+def openai_translate_finance(text, context=""):
     """英語原文を金融会見向けの日本語へ翻訳し、実使用量を月次記録する。"""
     if not CONFIG.get("openai_translation_enabled", True):
         return None
@@ -1055,12 +2042,17 @@ def openai_translate_finance(text):
         "否定、時制、条件表現、数値、単位、固有名詞を絶対に変えないでください。"
         "intervention=為替介入、Treasury yields=米国債利回り、basis points=ベーシスポイント、"
         "Federal Reserve=FRB、Bank of Japan=日本銀行、Scott Bessent=スコット・ベッセント財務長官。"
+        "文体はです・ます調に統一してください。文脈で意味が明確な慣用句・専門用語は自然に訳してください。"
+        "音声認識の崩れで意味が不明な箇所は、推測で埋めず（聞き取り不明）と示してください。"
+        "参考文脈は代名詞や指示語の解釈だけに使い、参考文脈自体は訳文に再出力しないでください。"
+        "明白な言い直しは意味を保って自然につなぎ、異なる主張や強調、数値は省略しないでください。"
+        "原文が未完の場合、結論を創作せず、未完と分かる表現にしてください。"
         "訳文だけを返してください。"
     )
     payload = {
         "model": selected_model,
         "instructions": instructions,
-        "input": text,
+        "input": json.dumps({"reference_context": context, "text_to_translate": text}, ensure_ascii=False),
         "max_output_tokens": 800,
     }
     response = requests.post(
@@ -1119,12 +2111,13 @@ def openai_decide_post_boundary(text, source_language="ja", force=False):
     if not api_key or remaining_openai_budget_jpy() < 5.0:
         return fallback_post_boundary(text, force)
 
-    prefix = "【AI速報訳・確認中】" if source_language == "en" else "【AI文字起こし・確認中】"
+    prefix = "【AI速報訳・確認中】" if source_language == "en" else ""
     max_body = max(60, int(CONFIG.get("post_assistant_max_chars", 180)) - len(prefix) - 10)
     instructions = (
         "あなたはYouTube速報投稿の編集者です。入力文を一字も言い換えず、追加・削除・要約せず、"
         "意味が完結して今すぐ投稿できる部分だけreadyへ分けてください。"
         "文、数値、否定表現、引用の途中では切らないでください。"
+        "短文一つずつに分けず、同じ話題の説明と指示語・代名詞を含む後続文は文字数上限内でまとめてください。"
         f"readyの各要素は{max_body}文字以内にしてください。"
         "末尾が未完ならremainderへそのまま残してください。"
         "force=trueなら末尾も可能な限り自然な位置でreadyへ入れてください。"
@@ -1141,35 +2134,56 @@ def openai_decide_post_boundary(text, source_language="ja", force=False):
         "max_output_tokens": 1000,
     }
     try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=max(10, int(CONFIG.get("openai_request_timeout_seconds", 30))),
-        )
-        response.raise_for_status()
-        data = response.json()
-        raw = response_output_text(data).strip()
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I)
-        decision = json.loads(raw)
-        ready = [str(x).strip() for x in decision.get("ready", []) if str(x).strip()]
-        remainder = str(decision.get("remainder", "")).strip()
+        for attempt in range(2):
+            request_payload = dict(payload)
+            if attempt:
+                request_payload["instructions"] = (
+                    instructions
+                    + "前回の応答はJSONとして解析できませんでした。"
+                    + "今回は前置き・説明・Markdownを一切付けず、必ず有効なJSONオブジェクトだけを返してください。"
+                )
+                print("🔄 AI投稿区切り判定のJSON形式を修正して再試行します。")
 
-        # AIが原文を書き換えた場合は採用せず、安全な区切りへ戻す。
-        if _compact_compare("".join(ready) + remainder) != _compact_compare(text):
-            raise ValueError("AI区切り結果が原文と一致しません")
-        if any(len(piece) > max_body for piece in ready):
-            raise ValueError("AI区切り結果が文字数上限を超えました")
+            response = requests.post(
+                "https://api.openai.com/v1/responses",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=request_payload,
+                timeout=max(10, int(CONFIG.get("openai_request_timeout_seconds", 30))),
+            )
+            response.raise_for_status()
+            data = response.json()
+            usage_data = data.get("usage", {})
+            record_openai_usage(
+                usage_data.get("input_tokens", 0), usage_data.get("output_tokens", 0),
+                model=str(CONFIG.get("openai_model", "gpt-5.6-luna")),
+            )
+            raw = response_output_text(data).strip()
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.I)
+            # JSONの前後に短い説明が混ざった場合も、オブジェクト部分だけを救済する。
+            first_brace = raw.find("{")
+            last_brace = raw.rfind("}")
+            if first_brace >= 0 and last_brace > first_brace:
+                raw = raw[first_brace:last_brace + 1]
+            try:
+                decision = json.loads(raw)
+                if not isinstance(decision, dict):
+                    raise ValueError("AI区切り結果がJSONオブジェクトではありません")
+                ready = [str(x).strip() for x in decision.get("ready", []) if str(x).strip()]
+                remainder = str(decision.get("remainder", "")).strip()
 
-        usage_data = data.get("usage", {})
-        record_openai_usage(
-            usage_data.get("input_tokens", 0), usage_data.get("output_tokens", 0),
-            model=str(CONFIG.get("openai_model", "gpt-5.6-luna")),
-        )
-        return ready, remainder
+                # AIが原文を書き換えた場合は採用せず、安全な区切りへ戻す。
+                if _compact_compare("".join(ready) + remainder) != _compact_compare(text):
+                    raise ValueError("AI区切り結果が原文と一致しません")
+                if any(len(piece) > max_body for piece in ready):
+                    raise ValueError("AI区切り結果が文字数上限を超えました")
+                return ready, remainder
+            except (json.JSONDecodeError, ValueError):
+                if attempt == 0:
+                    continue
+                raise
     except Exception as e:
         print(f"⚠️ AI投稿区切り判定を使えないため句読点判定へ切替: {_translation_error_summary(e)}")
         return fallback_post_boundary(text, force)
@@ -1243,14 +2257,29 @@ def _bing_translate(text, timeout):
     return html.unescape(translated)
 
 
-def translate_english_to_japanese(text):
+def has_obvious_negation_mismatch(original, translated):
+    # no longer が「義務が生じる」と訳された、今回確認済みの明白な逆転。
+    # 一般的な翻訳精度を保証する検査ではない。
+    return bool(re.search(r"\bno longer\b", original, re.I) and
+                re.search(r"もはや[^。！？]*なければならなくな", translated))
+
+
+def translate_english_to_japanese(text, context=""):
+    translated = _translate_english_to_japanese_unchecked(text, context=context)
+    if translated and has_obvious_negation_mismatch(text, translated):
+        print("⚠️ 否定表現の明白な不整合を検出。訳の表示・投稿候補化を保留します。英語原文は保存します。")
+        return None
+    return translated
+
+
+def _translate_english_to_japanese_unchecked(text, context=""):
     """OpenAI金融翻訳を優先し、障害・予算到達時は無料翻訳へ切替する。"""
     if not CONFIG.get("translate_english_to_japanese", True):
         return None
     timeout = max(5, int(CONFIG.get("translation_timeout_seconds", 20)))
 
     try:
-        translated = openai_translate_finance(text)
+        translated = openai_translate_finance(text, context=context)
         if translated:
             return translated
     except Exception as openai_error:
@@ -1326,8 +2355,11 @@ def translate_english_to_japanese(text):
 
 
 def split_for_chat(text, prefix):
-    """YouTubeチャットへ貼りやすい長さに分割する（投稿はしない）。"""
-    max_chars = max(80, int(CONFIG.get("post_assistant_max_chars", 180)))
+    """見出し・話者名・分割番号込みで200文字以内に分割する。"""
+    max_chars = min(
+        200,
+        max(80, int(CONFIG.get("post_assistant_max_chars", 200))),
+    )
     body_limit = max_chars - len(prefix) - 10
     pieces = []
     remaining = re.sub(r"\s+", " ", text).strip()
@@ -1335,23 +2367,93 @@ def split_for_chat(text, prefix):
         if len(remaining) <= body_limit:
             pieces.append(remaining)
             break
-        positions = [remaining.rfind(mark, 0, body_limit) for mark in ("。", "、", ".", ",", " ")]
-        cut = max(positions)
-        if cut < body_limit // 2:
+        cut = -1
+        # まず文末を探す。なければ読点を後ろから調べ、数値・専門語・
+        # 接続表現の途中になる位置を避ける。
+        for marks in (("。", "！", "？", ".", "!", "?"), ("、", ",", ";", " ")):
+            candidates = sorted(
+                {
+                    match.start()
+                    for mark in marks
+                    for match in re.finditer(re.escape(mark), remaining[:body_limit])
+                },
+                reverse=True,
+            )
+            for position in candidates:
+                if position < body_limit // 2:
+                    continue
+                after = remaining[position + 1:].lstrip()
+                before = remaining[:position].rstrip()
+                if re.match(r"^[0-9０-９.%％]", after):
+                    continue
+                if before.endswith(("と", "及び", "および", "また", "消費税", "税率", "金利")):
+                    continue
+                cut = position + 1
+                break
+            if cut > 0:
+                break
+        if cut < 0:
             cut = body_limit
-        else:
-            cut += 1
+            # 英数字・数値・単位の連続部分を真ん中で切らない。
+            while cut > body_limit // 2 and re.match(
+                r"[A-Za-z0-9０-９.%％]", remaining[cut:cut + 1]
+            ):
+                cut -= 1
         pieces.append(remaining[:cut].strip())
         remaining = remaining[cut:].strip()
+
+    # 「(4/5) ...こととし、」「(5/5) 関係省庁が...」のように、
+    # 最終片だけが短い場合は、完成形が上限内に収まるときだけ結合する。
+    if len(pieces) >= 2:
+        tail_merge_max = max(
+            max_chars,
+            min(200, int(CONFIG.get("post_assistant_tail_merge_max_chars", 200))),
+        )
+        combined = f"{pieces[-2]} {pieces[-1]}".strip()
+        combined_length = len(prefix) + len(combined) + 10
+        short_tail_limit = max(35, body_limit // 2)
+        if len(pieces[-1]) <= short_tail_limit and combined_length <= tail_merge_max:
+            pieces[-2:] = [combined]
     if len(pieces) <= 1:
         return [f"{prefix}{pieces[0]}"] if pieces else []
     return [f"{prefix}({i}/{len(pieces)}) {piece}" for i, piece in enumerate(pieces, 1)]
 
 
-def enqueue_post_assistant(text, source_language):
+def post_candidate_is_safe(text):
+    """誤投稿を避けるため、明白に崩れた認識文だけを保留する。"""
+    if not CONFIG.get("post_assistant_quality_gate_enabled", True):
+        return True
+    t = re.sub(r"\s+", " ", str(text)).strip()
+    suspicious = (
+        "GP費", "区道大臣", "勤務担当大臣", "移民され", "修理され",
+        "市場の地図上", "職跡", "本番の報告", "水平にある", "核受け制",
+        "二人のリーム", "YQして", "日陰上げ", "市長会見", "予対率",
+        "ルイジアット", "消滅することができる", "公費税、中博",
+    )
+    if any(x in t for x in suspicious):
+        return False
+    # 同じ長い句が短い範囲で反復した場合も、チャンク境界の混線として保留。
+    compact = re.sub(r"[、。！？!?\s]", "", t)
+    for width in (24, 20):
+        seen = set()
+        for start in range(0, max(0, len(compact) - width + 1), max(1, width // 2)):
+            phrase = compact[start:start + width]
+            if phrase in seen:
+                return False
+            seen.add(phrase)
+    return True
+
+
+def enqueue_post_assistant(text, source_language, speaker=None):
     if not CONFIG.get("post_assistant_enabled", True) or not text.strip():
         return
-    prefix = "【AI速報訳・確認中】" if source_language == "en" else "【AI文字起こし・確認中】"
+    if not post_candidate_is_safe(text):
+        print(f"🛡 認識品質が低い可能性があるため投稿候補を保留: {text[:70]}")
+        return
+    prefix = "【AI速報訳・確認中】" if source_language == "en" else ""
+    prefix = important_statement_marker(text, speaker) + prefix
+    if speaker:
+        prefix += f"\n【{speaker}】"
     for message in split_for_chat(text, prefix):
         POST_ASSIST_QUEUE.put(message)
         with _POST_ASSIST_FILE_LOCK:
@@ -1385,8 +2487,16 @@ def start_post_assistant_window(pause_event=None):
 
         status = tk.StringVar(value="投稿候補を待っています…")
         tk.Label(root, textvariable=status, anchor="w").pack(fill="x", padx=10, pady=(10, 4))
-        listbox = tk.Listbox(root, height=11, font=("Yu Gothic UI", 10))
-        listbox.pack(fill="both", expand=False, padx=10)
+        list_frame = tk.Frame(root)
+        list_frame.pack(fill="both", expand=False, padx=10)
+        list_scrollbar = tk.Scrollbar(list_frame, orient="vertical")
+        listbox = tk.Listbox(
+            list_frame, height=11, font=("Yu Gothic UI", 10),
+            yscrollcommand=list_scrollbar.set,
+        )
+        list_scrollbar.config(command=listbox.yview)
+        list_scrollbar.pack(side="right", fill="y")
+        listbox.pack(side="left", fill="both", expand=True)
         detail = tk.Text(root, height=10, wrap="word", font=("Yu Gothic UI", 12))
         detail.pack(fill="both", expand=True, padx=10, pady=8)
 
@@ -1461,8 +2571,10 @@ def start_post_assistant_window(pause_event=None):
                 pending = len(items) - len(copied)
                 status.set(f"未コピー {pending}件。候補は流れず、この画面に残ります。")
                 if not listbox.curselection():
-                    listbox.selection_set(0)
+                    listbox.selection_set("end")
                     show_selected()
+                # 新しい候補が追加されたら、常に最新候補が見える位置へ移動する。
+                listbox.see("end")
             while True:
                 try:
                     status.set(POST_ASSIST_STATUS_QUEUE.get_nowait())
@@ -1487,11 +2599,11 @@ def start_post_assistant_window(pause_event=None):
 
 def transcribe_with_retry(model, wav, video_id=None, source_language="ja"):
     """通常認識。異常反復ならプロンプト/前文依存を切って再認識する。"""
-    prompt = ENGLISH_WHISPER_PROMPT if source_language == "en" else WHISPER_PROMPT
+    prompt = None if source_language == "en" else WHISPER_PROMPT
     common = dict(
         language=source_language,
         vad_filter=True,
-        beam_size=max(1, int(CONFIG.get("beam_size", 8))),
+        beam_size=5 if source_language == "en" else max(1, int(CONFIG.get("beam_size", 8))),
         temperature=0.0,
     )
     segments, _ = model.transcribe(
@@ -1502,15 +2614,46 @@ def transcribe_with_retry(model, wav, video_id=None, source_language="ja"):
     )
     first = list(segments)
     joined = normalize_text(" ".join(x.text for x in first), video_id)
-    if not looks_hallucinated(joined):
+    try:
+        with wave.open(str(wav), "rb") as source:
+            audio_duration = source.getnframes() / max(1, source.getframerate())
+    except Exception:
+        audio_duration = 0.0
+
+    def coverage_and_gap(items):
+        if not items or audio_duration <= 0:
+            return 0.0, audio_duration
+        ordered = sorted(items, key=lambda item: float(item.start))
+        coverage = sum(max(0.0, float(item.end) - float(item.start)) for item in ordered)
+        gaps = [max(0.0, float(ordered[0].start))]
+        gaps.extend(
+            max(0.0, float(right.start) - float(left.end))
+            for left, right in zip(ordered, ordered[1:])
+        )
+        gaps.append(max(0.0, audio_duration - float(ordered[-1].end)))
+        return coverage, max(gaps or [0.0])
+
+    first_coverage, first_gap = coverage_and_gap(first)
+    sparse = bool(
+        first and audio_duration >= 20.0
+        and first_gap >= 12.0 and first_coverage < audio_duration * 0.75
+    )
+    first_hallucinated = looks_hallucinated(joined)
+    if first and not first_hallucinated and not sparse:
         return first, False
 
-    print(f"🔁 異常反復を検出。再認識します: {wav.name}")
+    reason = (
+        "認識結果が空" if not first
+        else "長い未認識区間を検出" if sparse and not first_hallucinated
+        else "異常反復を検出"
+    )
+    print(f"🔁 {reason}。条件を変えて再認識します: {wav.name}")
     # 再試行は強い語彙誘導を外し、beamも控えめにする。
     segments2, _ = model.transcribe(
         str(wav),
         language=source_language,
-        vad_filter=True,
+        # 空または長い欠落がある場合はVADを外し、小声の質問も拾う。
+        vad_filter=bool(first) and not sparse,
         beam_size=5,
         temperature=0.2,
         condition_on_previous_text=False,
@@ -1518,14 +2661,54 @@ def transcribe_with_retry(model, wav, video_id=None, source_language="ja"):
     )
     second = list(segments2)
     joined2 = normalize_text(" ".join(x.text for x in second), video_id)
+    if not second:
+        print(f"⚠️ 再認識後も空のため、この音声区間の出力を保留します: {wav.name}")
+        return [], True
     if looks_hallucinated(joined2):
-        print(f"⚠️ 再認識後も異常反復の可能性: {wav.name}")
+        if first and not first_hallucinated:
+            return first, True
+        print(f"⚠️ 再認識後も異常反復。誤訳・投稿を防ぐため、この音声区間の出力を保留します: {wav.name}")
+        return [], True
+    if sparse:
+        second_coverage, _ = coverage_and_gap(second)
+        if second_coverage <= first_coverage:
+            return first, True
     return second, True
 
 
 def is_sentence_end(text):
     t = text.rstrip()
-    return bool(re.search(r"[。！？!?]$", t))
+    # 省略符号や敬称のピリオドは文の完結ではない。
+    if re.search(r"(?:\.{2,}|…|—|–)[\"’”\']*$", t):
+        return False
+    if re.search(r"\b(?:Mr|Mrs|Ms|Dr|Jr|Sr|Prof|St|and|but|or|because|that|which|to|of|with|for)\.$", t, re.I):
+        return False
+    return bool(re.search(r"[。！？.!?][\"’”\']*$", t))
+
+
+def completed_english_segment_count(items):
+    """15秒以上のまとまりを確定。45秒を超えても未完の末尾は残す。"""
+    if not items:
+        return 0
+    duration = items[-1][2] - items[0][1]
+    if duration < 15:
+        return 0
+    if is_sentence_end(items[-1][0]):
+        return len(items)
+    if duration >= 45:
+        for index in range(len(items) - 2, -1, -1):
+            if is_sentence_end(items[index][0]):
+                return index + 1
+    return 0
+
+
+def translation_batch_ready(text, duration, language, max_merge):
+    if language != "en":
+        return is_sentence_end(text) or duration >= max_merge
+    # 英語は短文をまとめ、未完の文は次チャンクへ持ち越す。
+    # 追加待ち時間を制限するため、最大45秒で一旦確定する。
+    return (duration >= 15 and is_sentence_end(text)) or duration >= max(45, max_merge)
+
 
 
 def speaker_ranges_for(video_id):
@@ -1547,21 +2730,89 @@ def speaker_from_manual_ranges(start, end, ranges):
     return None
 
 
+def split_speaker_turn_text(text):
+    """40秒認識内に混在した司会・記者・要人の発言を定型句で分ける。"""
+    t = re.sub(r"\s+", " ", str(text)).strip()
+    if not t:
+        return []
+    # 文末直後に現れる、会見で信頼度の高い話者交代の合図だけを使う。
+    # 通常の「はい」すべてでは分けず、本文中の誤分割を避ける。
+    pattern = (
+        r"(?<=[。！？?])\s*(?="
+        r"幹事社|"
+        r"はい[、,]?\s*(?:まず冒頭|その報道|ありがとうございます|原則は)|"
+        r"はい[、,]?\s*ありがとうございました|"
+        r"申し訳ありません"
+        r")"
+    )
+    return [part.strip() for part in re.split(pattern, t) if part.strip()]
+
+
 def infer_speaker(text, previous_speaker, official_speaker):
     """軽量な話者推定。手動時間範囲がある場合はそちらを優先する。"""
     t = text.strip()
+    previous = str(previous_speaker or "")
+    # 会見開始・冒頭発言への誘導は運営側の発言だが、この番組では
+    # ユーザー指定に合わせて「記者」と表示する。
+    if any(x in t for x in (
+        "それでは、時間ですので", "それでは時間ですので",
+        "大臣の方から冒頭", "大臣から冒頭",
+    )):
+        return "記者"
+    # 会見での所属・氏名の自己紹介は、音声認識が質問末尾を崩しても
+    # 最も信頼できる記者開始の合図になる。
+    reporter_intro = bool(re.search(
+        r"(?:NHK|新聞|通信|ニュース|テレビ|放送|Bloomberg|Reuters|共同|時事|読売|朝日|毎日|産経|日経|TBS|ANN|FNN)"
+        r".{0,24}(?:と申します|です)",
+        t,
+        re.I,
+    ))
+    if reporter_intro:
+        return "記者"
+
+    # 質問が終わった直後の「はい」や回答定型句を、質問者の続きにしない。
+    answer_start = bool(re.match(
+        r"^(?:はい(?:[、。]|\s)|ありがとうございます|今般の|今日の大綱|"
+        r"その報道|その件|これはどちらか|いずれにしても|原則は)",
+        t,
+    ))
+    if "記者" in previous and answer_start:
+        return official_speaker
+
+    moderator_cues = (
+        "各社さん、質問", "質問ありましたら", "これで終了", "会見を終了",
+        "最後までお願いいたします", "では次の方", "幹事社さん",
+    )
+    if any(x in t for x in moderator_cues):
+        return "司会"
+
     reporter_cues = (
-        "伺います", "お聞きします", "質問", "教えてください", "でしょうか",
-        "ですか", "お願いします", "冒頭少し重複", "確認ですが", "お尋ね"
+        "伺います", "お伺い", "お聞きします", "お聞かせください", "教えてください", "でしょうか",
+        "ですか", "お願いします", "冒頭少し重複", "確認ですが", "お尋ね",
+        "と申します", "どのようにお考え", "見解を", "改めて伺",
+        "幹事社", "私から質問", "私の質問", "それでは大臣",
+        "ありがとうございました。それでは"
     )
     official_cues = (
         "申し上げ", "考えております", "認識しております", "対応してまいります",
-        "取り組んでまいります", "政府として", "内閣として", "お答え"
+        "取り組んでまいります", "政府として", "内閣として", "お答え",
+        "と考えています", "でございます", "決定会合ですが", "はい。まず"
     )
-    if any(x in t for x in reporter_cues):
+    # 質問から回答へ移った後は、大臣の定型表現を優先する。
+    if "記者" in previous and any(x in t for x in official_cues):
+        return official_speaker
+    # 「お願いします」だけでは、大臣の締め言葉を記者と誤判定するため
+    # 質問形または記者の自己紹介を伴う場合だけ交代させる。
+    strong_reporter_cues = tuple(
+        x for x in reporter_cues if x not in ("お願いします",)
+    )
+    if any(x in t for x in strong_reporter_cues):
         return "記者"
     if any(x in t for x in official_cues):
         return official_speaker
+    # 記者の質問は複数チャンクにまたがるため、明確な回答開始まで維持する。
+    if "記者" in previous:
+        return previous_speaker
     return previous_speaker or official_speaker
 
 
@@ -1574,116 +2825,388 @@ def choose_speaker(start, end, text, previous_speaker, official_speaker, manual_
     return infer_speaker(text, previous_speaker, official_speaker)
 
 
+def voice_signature(wav_path, start_seconds, end_seconds):
+    """音量・ゼロ交差率・概算基本周波数から軽量な声質特徴を作る。"""
+    if not CONFIG.get("voice_speaker_assist_enabled", True):
+        return None
+    try:
+        with wave.open(str(wav_path), "rb") as source:
+            rate = source.getframerate()
+            channels = source.getnchannels()
+            width = source.getsampwidth()
+            if width != 2 or rate <= 0:
+                return None
+            a = max(0, int(float(start_seconds) * rate))
+            b = min(source.getnframes(), int(float(end_seconds) * rate))
+            if b - a < rate // 2:
+                return None
+            # 区間中央の最大2.5秒を使い、無音境界の影響を減らす。
+            span = min(b - a, int(rate * 2.5))
+            a = a + max(0, (b - a - span) // 2)
+            source.setpos(a)
+            samples = array("h")
+            samples.frombytes(source.readframes(span))
+        if channels > 1:
+            samples = array("h", samples[::channels])
+        if not samples:
+            return None
+        step = max(1, rate // 4000)
+        values = [float(v) for v in samples[::step]]
+        if len(values) < 800:
+            return None
+        rms = math.sqrt(sum(v * v for v in values) / len(values)) / 32768.0
+        if rms < 0.004:
+            return None
+        zcr = sum(1 for x, y in zip(values, values[1:]) if (x < 0) != (y < 0)) / len(values)
+        mean = sum(values) / len(values)
+        centered = [v - mean for v in values]
+        sample_rate = rate / step
+        min_lag = max(8, int(sample_rate / 320.0))
+        max_lag = min(len(centered) // 3, int(sample_rate / 70.0))
+        best_lag = 0
+        best_score = 0.0
+        energy = sum(v * v for v in centered) or 1.0
+        for lag in range(min_lag, max_lag + 1):
+            score = sum(centered[i] * centered[i - lag] for i in range(lag, len(centered))) / energy
+            if score > best_score:
+                best_score, best_lag = score, lag
+        pitch = sample_rate / best_lag if best_lag and best_score >= 0.12 else 0.0
+        return (pitch, zcr, rms)
+    except Exception:
+        return None
+
+
+def voice_distance(a, b):
+    if not a or not b:
+        return 99.0
+    pitch_a, zcr_a, rms_a = a
+    pitch_b, zcr_b, rms_b = b
+    pitch_distance = abs(math.log((pitch_a or 120.0) / (pitch_b or 120.0)))
+    return pitch_distance + abs(zcr_a - zcr_b) * 4.0 + abs(rms_a - rms_b) * 1.5
+
+
+# 2026-09-04会見の確認済み発言から作成した、片山大臣対その他話者の
+# 保守的なMFCC線形判別器。音声そのものは保存せず、数値特徴だけを使う。
+_KATAYAMA_VOICE_COEF = (
+    -0.25964201, 0.27457485, -0.021895894, -0.053110331,
+    0.0059397884, -0.43079776, -0.23237483, 0.2083526,
+    0.74233822, 0.28167748, -0.27618828, 0.13621235,
+    -0.22034471, 0.14370668, 0.42293352, -0.11561328,
+    0.0061639221, 0.18889808, -0.049081821, 0.012880002,
+    0.11557944, 0.35669812, 0.10144907, -0.0071698795,
+)
+_KATAYAMA_VOICE_INTERCEPT = -7.369013307225795
+
+
+def katayama_voice_score(wav_path, start_seconds, end_seconds):
+    """片山大臣らしさ。高い正値=大臣、低い負値=別話者。失敗時はNone。"""
+    if not CONFIG.get("katayama_voice_profile_enabled", True):
+        return None
+    try:
+        import numpy as np
+        with wave.open(str(wav_path), "rb") as source:
+            rate = source.getframerate()
+            channels = source.getnchannels()
+            if source.getsampwidth() != 2 or rate <= 0:
+                return None
+            a = max(0, int(float(start_seconds) * rate))
+            b = min(source.getnframes(), int(float(end_seconds) * rate))
+            if b - a < rate:
+                return None
+            span = min(b - a, int(rate * 2.5))
+            a += max(0, (b - a - span) // 2)
+            source.setpos(a)
+            samples = np.frombuffer(source.readframes(span), dtype=np.int16).astype(np.float32)
+        if channels > 1:
+            samples = samples.reshape(-1, channels).mean(axis=1)
+        samples /= 32768.0
+        if len(samples) < int(rate * 1.0) or float(np.sqrt(np.mean(samples * samples))) < 0.004:
+            return None
+        samples = np.append(samples[0], samples[1:] - 0.97 * samples[:-1])
+        frame_len = int(0.025 * rate)
+        hop = int(0.010 * rate)
+        if len(samples) < frame_len:
+            return None
+        frames = np.lib.stride_tricks.sliding_window_view(samples, frame_len)[::hop].copy()
+        energy = np.mean(frames * frames, axis=1)
+        frames = frames[energy > np.quantile(energy, 0.35)]
+        if len(frames) < 20:
+            return None
+        frames *= np.hamming(frame_len)
+        fft_size = 512
+        power = np.abs(np.fft.rfft(frames, fft_size)) ** 2 / fft_size
+        mel_high = 2595.0 * np.log10(1.0 + rate / 2.0 / 700.0)
+        hz = 700.0 * (10.0 ** (np.linspace(0.0, mel_high, 28) / 2595.0) - 1.0)
+        bins = np.floor((fft_size + 1) * hz / rate).astype(int)
+        bank = np.zeros((26, fft_size // 2 + 1))
+        for m in range(1, 27):
+            left, center, right = bins[m - 1], bins[m], bins[m + 1]
+            for k in range(left, center):
+                bank[m - 1, k] = (k - left) / max(1, center - left)
+            for k in range(center, right):
+                bank[m - 1, k] = (right - k) / max(1, right - center)
+        log_energy = np.log(np.maximum(power @ bank.T, 1e-10))
+        dct = np.cos(
+            np.pi * np.arange(13)[:, None] * (np.arange(26) + 0.5) / 26.0
+        )
+        mfcc = (log_energy @ dct.T)[:, 1:13]
+        features = np.r_[mfcc.mean(axis=0), mfcc.std(axis=0)]
+        return float(np.dot(features, np.asarray(_KATAYAMA_VOICE_COEF)) + _KATAYAMA_VOICE_INTERCEPT)
+    except Exception:
+        return None
+
+
+def update_voice_profile(profiles, speaker, signature):
+    if not speaker or not signature or speaker in ("話者未確認", "司会"):
+        return
+    old = profiles.get(speaker)
+    if old is None:
+        profiles[speaker] = signature
+    else:
+        profiles[speaker] = tuple(old[i] * 0.75 + signature[i] * 0.25 for i in range(3))
+
+
+def assist_speaker_by_voice(candidate, previous_speaker, signature, profiles, official_speaker):
+    """本文だけでは交代を検出できない場合、学習済みの声質を補助に使う。"""
+    if not signature or len(profiles) < 2 or candidate != previous_speaker:
+        return candidate
+    ranked = sorted(
+        ((voice_distance(signature, profile), speaker) for speaker, profile in profiles.items()),
+        key=lambda item: item[0],
+    )
+    if len(ranked) >= 2 and ranked[0][0] + 0.22 < ranked[1][0] and ranked[0][0] < 0.75:
+        return ranked[0][1]
+    return candidate
+
+
 def start_stream_to_chunks(url, out_dir, stop_event, from_start=True):
     chunks = out_dir / "chunks"
     chunks.mkdir(parents=True, exist_ok=True)
-
+    ffmpeg_exe = find_ffmpeg()
     yt_cmd = [
-        sys.executable,
-        "-m", "yt_dlp",
-        "--quiet",
-        "--no-warnings",
-        "-f", "bestaudio/best",
-        "-o", "-",
+        sys.executable, "-m", "yt_dlp",
+        "--no-progress", "--no-playlist",
+        "--ffmpeg-location", str(ffmpeg_exe),
+        "-f", "bestaudio/best", "-o", "-",
     ]
     if from_start and CONFIG.get("download_from_start", True):
         yt_cmd.append("--live-from-start")
-
     browser = CONFIG.get("cookies_from_browser", "").strip()
     if browser:
         yt_cmd += ["--cookies-from-browser", browser]
-
     yt_cmd.append(url)
-
     seconds = max(10, int(CONFIG.get("chunk_seconds", 20)))
-    ffmpeg_exe = find_ffmpeg()
     ff_cmd = [
-        ffmpeg_exe,
-        "-hide_banner", "-loglevel", "warning",
-        "-i", "pipe:0",
-        "-vn",
-        "-ac", "1",
-        "-ar", "16000",
-        "-c:a", "pcm_s16le",
-        "-f", "segment",
-        "-segment_time", str(seconds),
-        "-reset_timestamps", "1",
-        str(chunks / "%06d.wav")
+        ffmpeg_exe, "-hide_banner", "-loglevel", "warning",
+        "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "16000",
+        "-c:a", "pcm_s16le", "-f", "segment",
+        "-segment_time", str(seconds), "-reset_timestamps", "1",
+        str(chunks / "%06d.wav"),
     ]
-
+    # stderrをファイルへ流し、長時間LIVEでのパイプ詰まりを防ぐ。
+    yt_log_path = out_dir / "音声取得エラー.log"
+    ff_log_path = out_dir / "FFmpegエラー.log"
+    yt = ff = None
     print("🎙 YouTube音声ストリームを開始...")
-    yt = None
-    ff = None
     try:
-        yt = subprocess.Popen(yt_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        ff = subprocess.Popen(
-            ff_cmd,
-            stdin=yt.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE
-        )
-        yt.stdout.close()
-
-        while ff.poll() is None:
+        with yt_log_path.open("wb") as yt_log, ff_log_path.open("wb") as ff_log:
+            yt = subprocess.Popen(yt_cmd, stdout=subprocess.PIPE, stderr=yt_log)
+            ff = subprocess.Popen(
+                ff_cmd, stdin=yt.stdout, stdout=subprocess.DEVNULL, stderr=ff_log
+            )
+            yt.stdout.close()
+            while ff.poll() is None:
+                if stop_event.is_set():
+                    break
+                time.sleep(1)
             if stop_event.is_set():
-                break
-            time.sleep(1)
-
-        if stop_event.is_set():
-            for p in (ff, yt):
+                for process in (ff, yt):
+                    if process.poll() is None:
+                        process.terminate()
+            rc_ff = ff.wait(timeout=20)
+            try:
+                rc_yt = yt.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                yt.kill()
+                rc_yt = yt.wait(timeout=10)
+            yt_log.flush()
+            ff_log.flush()
+        if not stop_event.is_set():
+            yt_error = yt_log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            ff_error = ff_log_path.read_text(encoding="utf-8", errors="replace")[-1500:]
+            if rc_yt != 0 or rc_ff != 0:
+                raise RuntimeError(
+                    f"YouTube音声取得コード {rc_yt} / FFmpegコード {rc_ff}\n"
+                    f"【音声取得側の詳細】\n{yt_error or '詳細なし'}\n"
+                    f"【FFmpeg側の詳細】\n{ff_error or '詳細なし'}"
+                )
+            if not any(wav.stat().st_size > 44 for wav in chunks.glob("*.wav")):
+                raise RuntimeError(f"音声チャンクを取得できませんでした。\n{yt_error}")
+    finally:
+        for process in (ff, yt):
+            if process and process.poll() is None:
                 try:
-                    p.terminate()
+                    process.kill()
+                    process.wait(timeout=10)
                 except Exception:
                     pass
+    return chunks
 
-        rc_ff = ff.wait(timeout=20) if ff else -1
+
+_NVIDIA_DLL_HANDLES = []
+
+
+def configure_nvidia_dll_paths():
+    """pipで入れたNVIDIA DLLをCTranslate2から見えるようにする。"""
+    if os.name != "nt":
+        return []
+    found = []
+    candidates = []
+    for entry in sys.path:
+        if not entry:
+            continue
+        base = Path(entry)
+        candidates.extend((
+            base / "nvidia" / "cublas" / "bin",
+            base / "nvidia" / "cudnn" / "bin",
+        ))
+    for folder in candidates:
+        if not folder.is_dir() or folder in found:
+            continue
+        found.append(folder)
+        os.environ["PATH"] = str(folder) + os.pathsep + os.environ.get("PATH", "")
         try:
-            yt.wait(timeout=20)
-        except Exception:
+            _NVIDIA_DLL_HANDLES.append(os.add_dll_directory(str(folder)))
+        except (AttributeError, OSError):
+            pass
+    return found
+
+
+def verify_whisper_runtime(model):
+    """実際に1秒の無音を処理し、CUDA DLL不足を開始前に検出する。"""
+    test_wav = DATA_DIR / ".gpu_runtime_test.wav"
+    try:
+        with wave.open(str(test_wav), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(16000)
+            output.writeframes(b"\x00\x00" * 16000)
+        segments, _ = model.transcribe(
+            str(test_wav), language="ja", vad_filter=False,
+            beam_size=1, condition_on_previous_text=False,
+        )
+        list(segments)
+    finally:
+        try:
+            test_wav.unlink()
+        except OSError:
             pass
 
-        if rc_ff != 0 and not stop_event.is_set():
-            err = ""
-            try:
-                err = ff.stderr.read().decode("utf-8", errors="replace")[-1500:]
-            except Exception:
-                pass
-            raise RuntimeError(f"ffmpeg終了コード {rc_ff}: {err}")
-    finally:
-        for p in (ff, yt):
-            if p and p.poll() is None:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
 
-    return chunks
+def effective_cpu_threads():
+    """16GB級PCでも操作余力を残しつつ、Whisperへ多めのCPUを割り当てる。"""
+    configured = int(CONFIG.get("cpu_threads", 0) or 0)
+    if configured > 0:
+        return configured
+    logical = max(2, int(os.cpu_count() or 2))
+    ratio = min(0.90, max(0.50, float(CONFIG.get("cpu_load_ratio", 0.75))))
+    upper = max(2, int(CONFIG.get("cpu_max_threads", 8) or 8))
+    # Windowsと画面操作用に最低1論理コア分を残す。
+    return max(2, min(upper, logical - 1, int(logical * ratio)))
 
 
 def transcribe_chunks(
     chunks_dir, txt_path, stop_event, title, video_id,
-    official_speaker=None, source_language="ja", pause_event=None
+    official_speaker=None, source_language="ja", pause_event=None,
+    archive_accuracy_mode=False, official_reference="",
+    live_reference_video_id=None,
 ):
     from faster_whisper import WhisperModel
 
-    try:
-        import torch
-        cuda = torch.cuda.is_available()
-    except Exception:
-        cuda = False
+    official_reference_state = build_official_reference_state(
+        official_reference, official_speaker
+    ) if official_reference else None
 
-    device = "cuda" if cuda else "cpu"
-    compute = "float16" if cuda else "int8"
-    model_name = CONFIG["transcription_model"]
+    prefer_gpu = bool(CONFIG.get("prefer_gpu", True))
+    cuda_devices = 0
+    cuda_probe_error = ""
+    if prefer_gpu:
+        try:
+            dll_paths = configure_nvidia_dll_paths()
+            if dll_paths:
+                print(f"🧩 NVIDIA DLL読込先: {len(dll_paths)}か所を検出")
+            import ctranslate2
+            cuda_devices = int(ctranslate2.get_cuda_device_count())
+        except Exception as e:
+            cuda_probe_error = str(e)
+
+    device = "cuda" if prefer_gpu and cuda_devices > 0 else "cpu"
+    compute = (
+        str(CONFIG.get("gpu_compute_type", "float16"))
+        if device == "cuda" else "int8"
+    )
+    base_model_name = (
+        CONFIG.get("english_transcription_model", "medium")
+        if source_language == "en" else CONFIG["transcription_model"]
+    )
+    model_name = base_model_name
+    if device == "cuda" and archive_accuracy_mode and source_language == "ja":
+        model_name = str(CONFIG.get("gpu_archive_transcription_model", "medium"))
     print(f"🧠 Whisperモデルを読み込み中: {model_name} ({device})")
     if source_language == "en":
         print("🌐 英語認識 → 日本語逐次翻訳: ON（英語原文も保存）")
+        print("🔗 英語は2チャンクをまとめて認識し、未完の末尾は次回へ持ち越します。")
     print("📝 専門用語ヒント・文つなぎ・誤字補正: ON")
     print("🛡 異常反復検出・自動再認識: ON")
+    if archive_accuracy_mode and source_language == "ja":
+        print(f"🎯 アーカイブ精度優先: ON（40秒・2チャンク認識 / {model_name}）")
     if CONFIG.get("speaker_labeling", True):
-        print("👥 話者ラベル: ON（手動時間範囲 + 軽量推定）")
+        detail = "公式問答 + 片山大臣音声プロファイル + 本文推定"
+        print(f"👥 話者ラベル: ON（{detail}）")
 
-    model = WhisperModel(model_name, device=device, compute_type=compute)
+    model = None
+    if device == "cuda":
+        gpu_index = max(0, int(CONFIG.get("gpu_device_index", 0) or 0))
+        print(
+            f"🚀 NVIDIA GPU処理: ON（GPU {gpu_index} / {compute} / "
+            f"検出{cuda_devices}台）"
+        )
+        try:
+            model = WhisperModel(
+                model_name,
+                device="cuda",
+                device_index=gpu_index,
+                compute_type=compute,
+            )
+            verify_whisper_runtime(model)
+            print("✅ GPU実演算テスト: 成功")
+        except Exception as e:
+            print(f"⚠️ GPU初期化に失敗しました: {e}")
+            print("↩️ 今回はCPUへ自動的に切り替えます。")
+            model = None
+            device = "cpu"
+            compute = "int8"
+            # GPU用mediumの初期化に失敗した場合、CPUではsmallへ戻して
+            # 長時間の極端な遅延を避ける。
+            model_name = base_model_name
+    elif prefer_gpu:
+        detail = f"（{cuda_probe_error}）" if cuda_probe_error else ""
+        print(f"⚠️ CTranslate2がNVIDIA GPUを検出できませんでした{detail}")
+        print("↩️ 今回はCPUで処理します。")
+
+    if model is None:
+        cpu_threads = effective_cpu_threads()
+        print(
+            f"⚙️ CPU高負荷処理: ON（{cpu_threads}論理コア使用 / "
+            f"検出{os.cpu_count() or '不明'}コア）"
+        )
+        model = WhisperModel(
+            model_name,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=cpu_threads,
+            num_workers=1,
+        )
 
     next_index = 0
     total_offset = 0.0
@@ -1692,12 +3215,15 @@ def transcribe_chunks(
     pending_end = None
     pending_speaker = None
     previous_speaker = None
+    translation_context = ""
+    english_pending = []
     post_buffer = ""
     post_buffer_speaker = None
     failed_attempts = {}
     max_merge = float(CONFIG.get("sentence_merge_max_seconds", 30))
     manual_ranges = speaker_ranges_for(video_id)
     official_speaker = official_speaker or CONFIG.get("archive_official_speakers", {}).get(video_id) or CONFIG.get("default_official_speaker", "高市総理")
+    voice_profiles = {}
 
     def submit_post_text(text, language, speaker=None, force=False):
         nonlocal post_buffer, post_buffer_speaker
@@ -1709,9 +3235,9 @@ def transcribe_chunks(
                 post_buffer, source_language=language, force=True
             )
             for piece in ready:
-                enqueue_post_assistant(piece, language)
+                enqueue_post_assistant(piece, language, speaker=post_buffer_speaker)
             if remainder:
-                enqueue_post_assistant(remainder, language)
+                enqueue_post_assistant(remainder, language, speaker=post_buffer_speaker)
             post_buffer = ""
 
         if text:
@@ -1720,8 +3246,16 @@ def transcribe_chunks(
         if not post_buffer:
             return
         min_chars = max(1, int(CONFIG.get("ai_post_min_chars", 20)))
+        group_min_chars = max(
+            min_chars, int(CONFIG.get("ai_post_group_min_chars", 90))
+        )
         max_buffer = max(100, int(CONFIG.get("ai_post_max_buffer_chars", 500)))
-        if not force and len(post_buffer) < min_chars:
+        is_important = bool(important_statement_marker(post_buffer, post_buffer_speaker))
+        important_min_chars = max(
+            min_chars, int(CONFIG.get("ai_post_important_min_chars", 80))
+        )
+        required_chars = important_min_chars if is_important else group_min_chars
+        if not force and len(post_buffer) < required_chars:
             return
         ready, remainder = openai_decide_post_boundary(
             post_buffer,
@@ -1729,11 +3263,12 @@ def transcribe_chunks(
             force=force or len(post_buffer) >= max_buffer,
         )
         for piece in ready:
-            enqueue_post_assistant(piece, language)
+            enqueue_post_assistant(piece, language, speaker=post_buffer_speaker)
             print(f"📋 AIが投稿可能と判断: {piece[:70]}")
         post_buffer = remainder
 
     def emit(f, start, end, text, speaker):
+        nonlocal translation_context
         text = normalize_text(text, video_id)
         if not text:
             return
@@ -1742,18 +3277,19 @@ def transcribe_chunks(
             print(f"【{speaker}】")
         if source_language == "en":
             if CONFIG.get("save_english_original", True):
-                original_line = f"[{fmt(start)} - {fmt(end)}] EN: {text}\n"
+                original_line = f"{important_statement_marker(text, speaker)}[{fmt(start)} - {fmt(end)}] EN: {text}\n"
                 f.write(original_line)
                 if CONFIG.get("display_english_original", False):
                     print(original_line, end="")
-            translated = translate_english_to_japanese(text)
+            translated = translate_english_to_japanese(text, context=translation_context)
+            translation_context = text[-1600:]
             if translated:
-                line = f"[{fmt(start)} - {fmt(end)}] 日本語: {translated}\n"
+                line = f"{important_statement_marker(translated, speaker)}[{fmt(start)} - {fmt(end)}] 日本語: {translated}\n"
                 submit_post_text(translated, "en", speaker=speaker)
             else:
                 line = f"[{fmt(start)} - {fmt(end)}] 日本語: （翻訳失敗・英語原文を参照）\n"
         else:
-            line = f"[{fmt(start)} - {fmt(end)}] {text}\n"
+            line = f"{important_statement_marker(text, speaker)}[{fmt(start)} - {fmt(end)}] {text}\n"
             submit_post_text(text, "ja", speaker=speaker)
         f.write(line)
         f.flush()
@@ -1764,11 +3300,14 @@ def transcribe_chunks(
         f.write(f"タイトル: {title}\n")
         f.write(f"URL: https://www.youtube.com/watch?v={video_id}\n")
         f.write(f"文字起こし開始: {datetime.now().isoformat(timespec='seconds')}\n")
-        f.write(f"モデル: {model_name}\n")
+        f.write(f"モデル: {model_name} / プログラム: {APP_VERSION}\n")
+        f.write(f"処理装置: {device} / 演算形式: {compute}\n")
         f.write(f"音声言語: {'英語（日本語へ逐次翻訳）' if source_language == 'en' else '日本語'}\n")
-        f.write(f"チャンク: {CONFIG['chunk_seconds']}秒\n")
+        recognition_chunks = 2 if source_language == "en" or archive_accuracy_mode else 1
+        f.write(f"チャンク: {CONFIG['chunk_seconds']}秒 / 認識単位: {recognition_chunks}チャンク\n")
         f.write("専門用語ヒント: ON / 文つなぎ: ON / 誤字補正: ON / 異常反復の自動再認識: ON\n")
-        f.write("話者ラベルは自動推定を含むため、最終確認を推奨します。\n\n")
+        f.write("〇 = 重要な金融発言の候補（自動判定。誤判定・見逃しあり）\n")
+        f.write("話者ラベル: タイトル判定・本文推定・軽量声質補助（最終確認を推奨）\n\n")
         f.flush()
 
         while True:
@@ -1789,21 +3328,135 @@ def transcribe_chunks(
                 except OSError:
                     wav_ready = False
 
+            read_count = 1
+            recognition_wav = wav
+            pair_for_accuracy = archive_accuracy_mode and source_language == "ja"
+            if (source_language == "en" or pair_for_accuracy) and wav_ready:
+                after_pair = chunks_dir / f"{next_index + 2:06d}.wav"
+                if following_wav.exists() and (after_pair.exists() or stop_event.is_set()):
+                    read_count = 2
+                    recognition_wav = chunks_dir.parent / (
+                        "英語認識用_2チャンク.wav"
+                        if source_language == "en"
+                        else "日本語精度優先用_2チャンク.wav"
+                    )
+                elif not stop_event.is_set():
+                    wav_ready = False
+
             if wav_ready:
                 try:
+                    if read_count == 2:
+                        concatenate_comparison_audio([wav, following_wav], recognition_wav)
                     segments, retried = transcribe_with_retry(
-                        model, wav, video_id, source_language=source_language
+                        model, recognition_wav, video_id, source_language=source_language
                     )
 
+                    if retried and not segments:
+                        end_offset = total_offset + read_count * float(CONFIG["chunk_seconds"])
+                        f.write(f"[{fmt(total_offset)} - {fmt(end_offset)}] 【認識保留】再認識後も異常反復のため出力を保留。元音声: {wav.name}から{read_count}チャンク\n")
+                        f.flush()
+                        # 保留区間の前後を一つの発言として結合しない。
+                        if english_pending:
+                            emit(f, english_pending[0][1], english_pending[-1][2],
+                                 " ".join(item[0] for item in english_pending), pending_speaker)
+                            english_pending = []
+                        translation_context = ""
+
+                    recognized_pieces = []
                     for s in segments:
-                        raw = normalize_text(s.text, video_id)
-                        if not raw:
+                        raw_segment = normalize_text(s.text, video_id)
+                        reference_speaker = None
+                        current_reference = official_reference
+                        if live_reference_video_id:
+                            with LIVE_OFFICIAL_REFERENCES_LOCK:
+                                current_reference = str(
+                                    LIVE_OFFICIAL_REFERENCES.get(
+                                        live_reference_video_id, {}
+                                    ).get("text", "")
+                                ) or current_reference
+                        if source_language == "ja" and current_reference:
+                            local_reference, reference_speaker = select_official_reference(
+                                raw_segment, official_reference_state
+                            )
+                            raw_segment = correct_with_official_reference(
+                                raw_segment, local_reference or current_reference
+                            )
+                            raw_segment = normalize_text(raw_segment, video_id)
+                        if not raw_segment:
                             continue
-                        start = total_offset + s.start
-                        end = total_offset + s.end
+                        segment_start = total_offset + s.start
+                        segment_end = total_offset + s.end
+                        parts = split_speaker_turn_text(raw_segment)
+                        total_chars = max(1, sum(len(part) for part in parts))
+                        cursor = segment_start
+                        for index, part in enumerate(parts):
+                            if index == len(parts) - 1:
+                                piece_end = segment_end
+                            else:
+                                fraction = len(part) / total_chars
+                                piece_end = min(segment_end, cursor + (segment_end - segment_start) * fraction)
+                            signature = voice_signature(
+                                recognition_wav,
+                                max(0.0, cursor - total_offset),
+                                max(0.0, piece_end - total_offset),
+                            )
+                            katayama_score = None
+                            if source_language == "ja" and "片山" in str(official_speaker):
+                                katayama_score = katayama_voice_score(
+                                    recognition_wav,
+                                    max(0.0, cursor - total_offset),
+                                    max(0.0, piece_end - total_offset),
+                                )
+                            recognized_pieces.append((
+                                part, cursor, piece_end, signature,
+                                reference_speaker, katayama_score,
+                            ))
+                            cursor = piece_end
+
+                    for piece in recognized_pieces:
+                        raw, start, end, signature = piece[:4]
+                        reference_speaker = piece[4] if len(piece) > 4 else None
+                        katayama_score = piece[5] if len(piece) > 5 else None
+                        manual_speaker = speaker_from_manual_ranges(
+                            start, end, manual_ranges
+                        )
                         candidate_speaker = choose_speaker(
                             start, end, raw, previous_speaker, official_speaker, manual_ranges
                         )
+                        # 動画ごとに確認済みの固定区間がある場合は最優先する。
+                        # 公式本文の進行推定が一文ずれることで、大臣発言を
+                        # 記者として上書きしないようにする。
+                        if manual_speaker:
+                            candidate_speaker = manual_speaker
+                        elif reference_speaker:
+                            candidate_speaker = reference_speaker
+                        elif katayama_score is not None:
+                            # 境界付近は本文推定を維持し、高確信時だけ補正する。
+                            if katayama_score >= 2.2:
+                                candidate_speaker = official_speaker
+                            elif katayama_score <= -2.5:
+                                candidate_speaker = "記者"
+                        candidate_speaker = assist_speaker_by_voice(
+                            candidate_speaker, previous_speaker, signature,
+                            voice_profiles, official_speaker,
+                        )
+                        update_voice_profile(voice_profiles, candidate_speaker, signature)
+
+                        if source_language == "en":
+                            if english_pending and candidate_speaker != pending_speaker:
+                                emit(f, english_pending[0][1], english_pending[-1][2],
+                                     " ".join(item[0] for item in english_pending), pending_speaker)
+                                english_pending = []
+                            pending_speaker = candidate_speaker
+                            english_pending.append((raw, start, end))
+                            previous_speaker = candidate_speaker
+                            count = completed_english_segment_count(english_pending)
+                            if count:
+                                ready_items = english_pending[:count]
+                                emit(f, ready_items[0][1], ready_items[-1][2],
+                                     " ".join(item[0] for item in ready_items), pending_speaker)
+                                english_pending = english_pending[count:]
+                            continue
 
                         if not pending_text:
                             pending_text = raw
@@ -1825,15 +3478,15 @@ def transcribe_chunks(
                         previous_speaker = candidate_speaker
 
                         duration = (pending_end - pending_start) if pending_start is not None else 0
-                        if is_sentence_end(pending_text) or duration >= max_merge:
+                        if translation_batch_ready(pending_text, duration, source_language, max_merge):
                             emit(f, pending_start, pending_end, pending_text, pending_speaker)
                             pending_text = ""
                             pending_start = pending_end = None
                             pending_speaker = None
 
-                    total_offset += float(CONFIG["chunk_seconds"])
+                    total_offset += read_count * float(CONFIG["chunk_seconds"])
                     failed_attempts.pop(next_index, None)
-                    next_index += 1
+                    next_index += read_count
                     continue
                 except Exception as e:
                     failed_attempts[next_index] = failed_attempts.get(next_index, 0) + 1
@@ -1856,6 +3509,11 @@ def transcribe_chunks(
 
             time.sleep(1)
 
+        if english_pending:
+            # 配信終了時のみ、残った未完文も原文とともに確定する。
+            emit(f, english_pending[0][1], english_pending[-1][2],
+                 " ".join(item[0] for item in english_pending), pending_speaker)
+
         if pending_text:
             emit(f, pending_start or 0, pending_end or pending_start or 0, pending_text, pending_speaker)
 
@@ -1877,16 +3535,24 @@ def archive_media_info(url):
         url,
     ]
     try:
+        child_env = os.environ.copy()
+        # Windowsでもyt-dlpの日本語メタデータをUTF-8で受け取る。
+        child_env["PYTHONIOENCODING"] = "utf-8"
         completed = subprocess.run(
             command,
             capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
+            text=False,
+            env=child_env,
             timeout=30,
             check=True,
         )
-        values = [line.strip() for line in completed.stdout.splitlines()]
+        raw_output = completed.stdout
+        try:
+            decoded_output = raw_output.decode("utf-8")
+        except UnicodeDecodeError:
+            # 旧環境でWindows日本語コードとして出力された場合の互換処理。
+            decoded_output = raw_output.decode("cp932", errors="replace")
+        values = [line.strip() for line in decoded_output.splitlines()]
         actual_title = values[0] if values else ""
         language = values[1].lower() if len(values) >= 2 else ""
         if language in {"na", "none", "null", "unknown"}:
@@ -1899,12 +3565,9 @@ def archive_media_info(url):
 
 def archive_language_and_speaker(url, supplied_title, video_id):
     """任意のアーカイブ動画について、実タイトルから言語と話者を安全に決める。"""
-    known_speaker = CONFIG.get("archive_official_speakers", {}).get(video_id)
-    if known_speaker:
-        return "ja", known_speaker, supplied_title
-
     actual_title, metadata_language = archive_media_info(url)
     combined_title = f"{actual_title} {supplied_title}".strip()
+    known_speaker = CONFIG.get("archive_official_speakers", {}).get(video_id)
     english_terms = (
         "bessent", "treasury", "federal reserve", "powell", "fomc",
         "stanford", "commencement", "english", "u.s.", "united states",
@@ -1919,10 +3582,20 @@ def archive_language_and_speaker(url, supplied_title, video_id):
     language = "en" if is_english else "ja"
 
     lowered = combined_title.lower()
-    if "bessent" in lowered or "ベッセント" in combined_title:
+    if known_speaker:
+        speaker = known_speaker
+    elif "bessent" in lowered or "ベッセント" in combined_title:
         speaker = "スコット・ベッセント 米財務長官"
     elif "powell" in lowered or "パウエル" in combined_title:
         speaker = "ジェローム・パウエル FRB議長"
+    elif "片山" in combined_title and any(x in combined_title for x in ("財務", "大臣", "財務相")):
+        speaker = "片山財務大臣"
+    elif "高市" in combined_title and any(x in combined_title for x in ("総理", "首相", "会見")):
+        speaker = "高市総理"
+    elif "植田" in combined_title and any(x in combined_title for x in ("日銀", "総裁")):
+        speaker = "植田和男 日銀総裁"
+    elif "三村" in combined_title and "財務官" in combined_title:
+        speaker = "三村淳 財務官"
     else:
         # 任意のテスト動画を日本の監視対象者だと誤表示しない。
         speaker = "話者未確認"
@@ -1972,11 +3645,17 @@ def process_url(url, title="YouTube Archive"):
         archive_language, archive_speaker, detected_title = archive_language_and_speaker(
             url, title, video_id
         )
+        official_reference = fetch_official_archive_reference(video_id, out_dir=out_dir)
+        if result["error"] and not any(chunks_dir.glob("*.wav")):
+            print("⏹ 音声取得に失敗したため、Whisperの読み込みを省略します。")
+            return
         transcribe_chunks(
             chunks_dir, txt_path, stop_event, detected_title, video_id,
             official_speaker=archive_speaker,
             source_language=archive_language,
             pause_event=pause_event,
+            archive_accuracy_mode=True,
+            official_reference=official_reference,
         )
         if result["error"]:
             print("Audio stream error:", result["error"])
@@ -2022,10 +3701,17 @@ def process_conference(item, active, processed, event_type="live"):
     # 予約Liveは通知だけ行い、配信開始前の音声取得は始めない。
     if event_type == "upcoming":
         processed.add(vid)
+        scheduled_start = scheduled_start_for_video(vid)
+        ensure_official_reference_watcher(
+            vid, person, title, scheduled_start=scheduled_start
+        )
         notify(f"{person}の予約LIVEを検出", f"{title}\n{url}")
         return
 
     active.add(vid)
+    ensure_official_reference_watcher(
+        vid, person, title, scheduled_start=datetime.now(timezone.utc)
+    )
     stop_event = threading.Event()
     manual_stop_event = threading.Event()
     with ACTIVE_TRANSCRIPTIONS_LOCK:
@@ -2068,7 +3754,8 @@ def process_conference(item, active, processed, event_type="live"):
         chunks_dir.mkdir(parents=True, exist_ok=True)
         transcribe_chunks(
             chunks_dir, txt_path, stop_event, title, vid,
-            official_speaker=person, source_language=source_language
+            official_speaker=person, source_language=source_language,
+            live_reference_video_id=vid,
         )
 
         if manual_stop_event.is_set():
@@ -2093,8 +3780,144 @@ def process_conference(item, active, processed, event_type="live"):
                     pass
 
 
+def choose_comparison_audio(data_dir, chunk_seconds):
+    """直近の英語テストから、崩れた原文の周辺の保存音声を選ぶ。"""
+    candidates = []
+    for folder in data_dir.iterdir():
+        if not folder.is_dir() or not (folder / "chunks").is_dir():
+            continue
+        txts = list(folder.glob("*文字起こし*.txt"))
+        for txt in txts:
+            content = txt.read_text(encoding="utf-8-sig", errors="replace")
+            if "EN:" in content:
+                candidates.append((txt.stat().st_mtime, folder, content))
+                break
+    if not candidates:
+        raise RuntimeError("英語の保存音声が見つかりません。dataフォルダを残した状態で実行してください。")
+    _, folder, content = max(candidates, key=lambda x: x[0])
+    wavs = sorted(p for p in (folder / "chunks").glob("*.wav") if p.stem.isdigit())
+    if not wavs:
+        raise RuntimeError(f"保存音声がありません: {folder / 'chunks'}")
+    # 実行ごとの時間のずれを避け、TXT内の発言から対象区間を探す。
+    start = None
+    for line in content.splitlines():
+        if "EN:" not in line:
+            continue
+        if re.search(r"favoritization|price to price|generous works|understatement", line, re.I):
+            match = re.match(r"\[(\d+:\d+:\d+)\s*-", line)
+            if match:
+                start = parse_hms(match.group(1))
+                break
+    target = int(start // chunk_seconds) if start is not None else int(wavs[0].stem)
+    by_index = {int(p.stem): p for p in wavs}
+    if target not in by_index:
+        raise RuntimeError("対象区間の音声が見つかりません。keep_audio設定とchunksフォルダを確認してください。")
+    selected = [by_index[i] for i in range(max(0, target - 1), target + 2) if i in by_index]
+    return folder, selected, content
+
+
+def concatenate_comparison_audio(paths, destination):
+    import wave
+    expected = None
+    with wave.open(str(destination), "wb") as output:
+        for path in paths:
+            with wave.open(str(path), "rb") as source:
+                params = (source.getnchannels(), source.getsampwidth(), source.getframerate(), source.getcomptype())
+                if expected is None:
+                    expected = params
+                    output.setnchannels(params[0])
+                    output.setsampwidth(params[1])
+                    output.setframerate(params[2])
+                elif params != expected:
+                    raise RuntimeError("保存音声の形式が一致しません。")
+                output.writeframes(source.readframes(source.getnframes()))
+    with wave.open(str(destination), "rb") as result:
+        return result.getnframes() / result.getframerate()
+
+
+def compare_saved_english_audio():
+    """APIを呼ばず、同じ保存音声をsmall/mediumで比較する。設定は変更しない。"""
+    import gc
+    from faster_whisper import WhisperModel
+
+    folder, selected, original = choose_comparison_audio(
+        DATA_DIR, max(10, int(CONFIG.get("chunk_seconds", 20)))
+    )
+    result_dir = DATA_DIR / ("英語認識比較_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f"))
+    result_dir.mkdir(parents=True, exist_ok=True)
+    sample = result_dir / "比較用音声.wav"
+    duration = concatenate_comparison_audio(selected, sample)
+    report = result_dir / "英語認識比較結果.txt"
+    print(f"比較元: {folder.name}")
+    print("対象: " + ", ".join(p.name for p in selected))
+    print(f"音声: {duration:.1f}秒 / CPU / int8")
+    print("初回のmediumモデルはダウンロードします。結果は日本語訳をせず英語のまま保存します。")
+    print("精度は正解原稿なしでは自動判定できません。比較結果をチャットへ添付してください。")
+    with report.open("w", encoding="utf-8-sig") as output:
+        output.write(f"英語認識比較 / プログラム {APP_VERSION}\n")
+        output.write(f"比較元: {folder}\n対象: {', '.join(p.name for p in selected)}\n音声時間: {duration:.2f}秒\n")
+        output.write("条件: CPU/int8、英語、beam_size=5、temperature=0、ヒントなし、前文依存なし\n")
+        output.write("処理時間はモデル読み込みと認識を別々に記録。認識時間/音声時間が1を超える場合、音声の長さ以上の時間がかかっています。\n")
+        output.write("モデルの違いに加え、複数チャンクを結合した効果も含みます。正解原稿がないため精度の自動判定はしません。\n\n")
+        chunk_seconds = max(10, int(CONFIG.get("chunk_seconds", 20)))
+        lo = int(selected[0].stem) * chunk_seconds
+        hi = (int(selected[-1].stem) + 1) * chunk_seconds
+        output.write("【以前の原文（参考・正解ではありません）】\n")
+        for line in original.splitlines():
+            match = re.match(r"\[(\d+:\d+:\d+)\s*-\s*(\d+:\d+:\d+)\]\s*EN:", line)
+            if match and parse_hms(match.group(1)) < hi and parse_hms(match.group(2)) > lo:
+                output.write(line + "\n")
+        output.flush()
+        for model_name in ("small", "medium"):
+            model = None
+            output.write(f"\n【{model_name}・結合音声の再認識】\n")
+            output.flush()
+            try:
+                print(f"モデル読み込み中: {model_name}")
+                loading_start = time.perf_counter()
+                model = WhisperModel(model_name, device="cpu", compute_type="int8")
+                load_seconds = time.perf_counter() - loading_start
+                print(f"認識中: {model_name}")
+                recognition_start = time.perf_counter()
+                segments, _ = model.transcribe(
+                    str(sample), language="en", vad_filter=True, beam_size=5,
+                    temperature=0.0, condition_on_previous_text=False, initial_prompt=None,
+                )
+                segments = list(segments)
+                seconds = time.perf_counter() - recognition_start
+                output.write(f"モデル読み込み: {load_seconds:.2f}秒\n認識時間: {seconds:.2f}秒\n認識時間/音声時間: {seconds / duration:.2f}\n")
+                for segment in segments:
+                    output.write(f"[{segment.start:.2f} - {segment.end:.2f}] {segment.text.strip()}\n")
+                if not segments:
+                    output.write("音声認識結果なし\n")
+                print(f"{model_name}: 認識完了 {seconds:.1f}秒")
+            except Exception as error:
+                output.write(f"実行できませんでした: {type(error).__name__}: {error}\n")
+                print(f"{model_name}の比較に失敗しました: {error}")
+            finally:
+                output.flush()
+                del model
+                gc.collect()
+    print(f"\n比較結果: {report}")
+    if os.name == "nt":
+        try:
+            os.startfile(str(result_dir))
+        except OSError:
+            pass
+
+
 def main():
+    ensure_update_only_bat()
+    ensure_gpu_setup_bat()
     check_for_updates()
+
+    if "--update-only" in sys.argv:
+        print(f"✅ 更新確認が完了しました（現在のバージョン {APP_VERSION}）")
+        return
+
+    if "--compare-audio" in sys.argv:
+        compare_saved_english_audio()
+        return
 
     if len(sys.argv) >= 2 and sys.argv[1].startswith(("http://", "https://")):
         url = sys.argv[1]
@@ -2135,7 +3958,8 @@ def main():
     print("通常投稿動画: 監視対象外")
     print("見逃し配信・見逃しライブ: 監視対象外")
     print("文字起こしの手動停止: s を入力して Enter（監視は継続）")
-    print("イベント日: 24時間・配信中Liveを15分間隔（予約検索は省略）")
+    print("公式資料: 財務省・日銀を会見開始5分前から1分間隔で監視")
+    print("イベント日: 24時間・配信中Liveを15分間隔（予約検索は起動時のみ）")
     if CONFIG.get("enable_bessent_monitoring", False):
         print("海外主要チャンネル: 2分間隔の直接監視（検索API漏れ対策）")
     print(f"文字起こしチャンク: {CONFIG['chunk_seconds']}秒")
@@ -2153,6 +3977,7 @@ def main():
     processed = set()
     notified_upcoming = set()
     next_upcoming_scan = 0.0
+    startup_upcoming_scan_done = False
     first_scan = True
 
     start_post_assistant_window()
@@ -2199,7 +4024,9 @@ def main():
             # 通常日は予約Liveを1時間ごとに検索。イベント日は配信中Liveを
             # 15分間隔で24時間検索し、API上限維持のため予約検索を省略する。
             now_mono = time.monotonic()
-            if not event_day and now_mono >= next_upcoming_scan:
+            # イベント日も起動直後だけ予約LIVEを確認し、公式資料の
+            # 「開始5分前監視」を登録する。その後はAPI上限のため省略する。
+            if (not event_day or not startup_upcoming_scan_done) and now_mono >= next_upcoming_scan:
                 upcoming_items = search_upcoming()
                 for item in upcoming_items:
                     vid = item.get("id", {}).get("videoId")
@@ -2207,6 +4034,7 @@ def main():
                         process_conference(
                             item, active, notified_upcoming, "upcoming"
                         )
+                startup_upcoming_scan_done = True
                 next_upcoming_scan = now_mono + upcoming_interval_minutes * 60
 
             if event_day:
