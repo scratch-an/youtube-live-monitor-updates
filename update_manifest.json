@@ -1,7 +1,7 @@
 {
-  "version": "7.4.27",
+  "version": "7.4.31",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.27.py",
-  "sha256": "102d342edadaa5ff56191fb225183a4993e0eec490a7d338b835722412860ca3",
-  "notes": "片山財務大臣の確認済み音声から作成した音声プロファイルを高確信時の話者判定に追加。公式原稿の進行追跡が低一致で先へ飛ばないよう修正。会見開始の運営発言を記者として判定。長い未認識区間はVADを外して再認識。日本語投稿候補から【AI文字起こし・確認中】を削除。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.31.py",
+  "sha256": "a8035c3de1f1bb27e33fd36ed52ddf5db214bded7f6e8648547456a3c362574e",
+  "notes": "GPUで日本語アーカイブを処理するときmediumモデルを使用し、CPUフォールバック時はsmallを維持。片山財務大臣9月4日会見の話者交代時刻と、概算要求・債務残高・通年の国債発行額など確認済み誤認識を補正。"
 }
