@@ -1,7 +1,7 @@
 {
-  "version": "7.4.33",
+  "version": "7.4.34",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.33.py",
-  "sha256": "6ac1e51e754aed11ef20a9e76d09fb58350916afa6fe8fb3c8cacbd139363b1e",
-  "notes": "test20260923_001の確認結果を反映。事項要求、GX・AI・半導体、概算要求、ベッセント長官などの誤認識を補正し、片山財務大臣と記者の境界を修正。〇判定を為替介入・強い為替評価・金融政策変更の具体発言だけに厳格化。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.34.py",
+  "sha256": "dace283abc8a6087eb937465f963a33e58bdf3b5d3c1d7bea6c219d308817b4f",
+  "notes": "片山財務大臣test20260923_002の追加誤認識を補正。指定された国連LIVEを直接監視し、高市総理の会見前後に首相官邸・外務省・政府広報等の公式テキストを監視して認識補正へ利用。国連関連の専門用語ヒントも追加。"
 }
