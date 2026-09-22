@@ -1,7 +1,7 @@
 {
-  "version": "7.4.32",
+  "version": "7.4.33",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.32.py",
-  "sha256": "572ff0ea35a1ccb05411152fcf0f50ba1f435cdaa3671a82e1df7fe2adeff8f7",
-  "notes": "話者表示を片山財務大臣へ統一。確認済み固定話者区間を公式本文推定より優先し、冒頭の大臣発言が記者になる問題を修正。test39で確認した金利上昇・経済財政運営・通年の国債発行額などの誤認識を補正。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.33.py",
+  "sha256": "6ac1e51e754aed11ef20a9e76d09fb58350916afa6fe8fb3c8cacbd139363b1e",
+  "notes": "test20260923_001の確認結果を反映。事項要求、GX・AI・半導体、概算要求、ベッセント長官などの誤認識を補正し、片山財務大臣と記者の境界を修正。〇判定を為替介入・強い為替評価・金融政策変更の具体発言だけに厳格化。"
 }
