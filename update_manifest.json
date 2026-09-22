@@ -1,7 +1,7 @@
 {
-  "version": "7.4.31",
+  "version": "7.4.32",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.31.py",
-  "sha256": "a8035c3de1f1bb27e33fd36ed52ddf5db214bded7f6e8648547456a3c362574e",
-  "notes": "GPUで日本語アーカイブを処理するときmediumモデルを使用し、CPUフォールバック時はsmallを維持。片山財務大臣9月4日会見の話者交代時刻と、概算要求・債務残高・通年の国債発行額など確認済み誤認識を補正。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.32.py",
+  "sha256": "572ff0ea35a1ccb05411152fcf0f50ba1f435cdaa3671a82e1df7fe2adeff8f7",
+  "notes": "話者表示を片山財務大臣へ統一。確認済み固定話者区間を公式本文推定より優先し、冒頭の大臣発言が記者になる問題を修正。test39で確認した金利上昇・経済財政運営・通年の国債発行額などの誤認識を補正。"
 }
