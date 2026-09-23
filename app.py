@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.39"
+APP_VERSION = "7.4.40"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -365,6 +365,9 @@ DEFAULT_CONFIG = {
     "gpu_device_index": 0,
     "gpu_compute_type": "float16",
     "download_from_start": True,
+    # アーカイブテストへ予約LIVEを入力した場合、開始まで終了せず待機する。
+    "archive_wait_for_upcoming_live": True,
+    "archive_wait_interval_seconds": 30,
     "cookies_from_browser": "",
     "keep_audio": True,
     "chunk_seconds": 20,
@@ -3755,6 +3758,71 @@ def archive_media_info(url):
         return "", ""
 
 
+def wait_for_archive_live_start(url):
+    """予約LIVEなら音声URLが取得可能になるまで待機する。"""
+    if not CONFIG.get("archive_wait_for_upcoming_live", True):
+        return True
+    try:
+        interval = max(15, int(CONFIG.get("archive_wait_interval_seconds", 30)))
+    except (TypeError, ValueError):
+        interval = 30
+    command = [
+        sys.executable, "-m", "yt_dlp",
+        "--no-playlist", "--no-warnings", "--get-url",
+        "-f", "bestaudio/best", url,
+    ]
+    waiting_patterns = (
+        "will begin in", "will begin at", "is scheduled for",
+        "premieres in", "premiere will begin", "live event will begin",
+        "配信開始まで", "ライブ配信は", "開始予定",
+    )
+    first_wait = True
+    while True:
+        try:
+            completed = subprocess.run(
+                command, capture_output=True, text=False, timeout=45, check=False,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+        except KeyboardInterrupt:
+            print("\n⏹ 配信開始待機を中止しました。")
+            return False
+        except Exception as e:
+            print(f"⚠️ 配信状態を確認できません。通常取得を試します: {e}")
+            return True
+
+        raw_error = (completed.stderr or b"").decode("utf-8", errors="replace")
+        raw_output = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+        if completed.returncode == 0 and raw_output:
+            if not first_wait:
+                print("\n▶ 配信開始を確認しました。文字起こしを開始します。")
+            return True
+
+        lowered = raw_error.lower()
+        if not any(pattern in lowered for pattern in waiting_patterns):
+            # 開始前以外のエラーは従来処理へ渡し、詳細ログを保存させる。
+            return True
+
+        if first_wait:
+            print("⏳ 予約LIVEはまだ始まっていません。配信開始まで待機します。")
+            print("   待機を中止する場合は Ctrl+C を押してください。")
+            first_wait = False
+        remaining = re.search(r"will begin in\s+(\d+)\s+(minute|hour)", lowered)
+        detail = ""
+        if remaining:
+            unit = "分" if remaining.group(2) == "minute" else "時間"
+            detail = f"（開始まで約{remaining.group(1)}{unit}）"
+        next_check = datetime.now() + timedelta(seconds=interval)
+        print(
+            f"\r⏳ 配信開始待ち {detail} / 次回確認 {next_check.strftime('%H:%M:%S')}",
+            end="", flush=True,
+        )
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            print("\n⏹ 配信開始待機を中止しました。")
+            return False
+
+
 def archive_language_and_speaker(url, supplied_title, video_id):
     """任意のアーカイブ動画について、実タイトルから言語と話者を安全に決める。"""
     actual_title, metadata_language = archive_media_info(url)
@@ -3815,6 +3883,9 @@ def process_url(url, title="YouTube Archive"):
     print(f"URL: {url}")
     print("Full transcription from the beginning")
     print("=" * 65)
+
+    if not wait_for_archive_live_start(url):
+        return
 
     pause_event = threading.Event()
     window_closed = start_post_assistant_window(pause_event=pause_event)
