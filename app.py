@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.36"
+APP_VERSION = "7.4.37"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -339,7 +339,10 @@ DEFAULT_CONFIG = {
         "Scott Bessent", "Secretary Bessent", "Bessent", "ベッセント"
     ],
     # Live形式でも、録画の見逃し配信として公開されたものは除外する。
-    "excluded_title_terms": ["見逃し配信", "見逃しライブ"],
+    "excluded_title_terms": [
+        "見逃し配信", "見逃しライブ", "リプレイ", "ニュースまとめ",
+        "政治ニュースまとめ", "【政治ライブ】", "ノーカット"
+    ],
     # 個人チャンネルを除外し、官公庁・中央銀行・報道機関だけを許可する。
     "organization_channel_terms": [
         "首相官邸", "政府広報", "内閣府", "財務省", "Ministry of Finance",
@@ -1043,6 +1046,11 @@ def load_config():
     # 高市総理向けの追加監視先は旧config.jsonに存在しないため常に維持する。
     official_sources["pm"] = DEFAULT_CONFIG["official_live_source_urls"]["pm"]
     out["official_live_source_urls"] = official_sources
+    # 旧config.jsonが存在しても、新版のリプレイ除外語を必ず維持する。
+    out["excluded_title_terms"] = list(dict.fromkeys(
+        list(DEFAULT_CONFIG.get("excluded_title_terms", []))
+        + list(cfg.get("excluded_title_terms", []))
+    ))
     return out
 
 
@@ -4139,7 +4147,16 @@ def checker_collect_official_events():
         try:
             response = requests.get(
                 str(source_url), timeout=(5, 25),
-                headers={"User-Agent": "Mozilla/5.0 YouTubeConferenceChecker/1.0"},
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "ja,en-US;q=0.8,en;q=0.6",
+                    "Referer": "https://www.mofa.go.jp/",
+                },
             )
             response.raise_for_status()
             source = _decode_official_html(response)
