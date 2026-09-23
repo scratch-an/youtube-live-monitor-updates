@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.40"
+APP_VERSION = "7.4.41"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -368,6 +368,9 @@ DEFAULT_CONFIG = {
     # アーカイブテストへ予約LIVEを入力した場合、開始まで終了せず待機する。
     "archive_wait_for_upcoming_live": True,
     "archive_wait_interval_seconds": 30,
+    # 日本語アーカイブはmediumの精度を維持しつつ、20秒ごとに即時表示する。
+    # OFFにすると従来どおり40秒・2チャンクをまとめて認識する。
+    "archive_fast_first_pass": True,
     "cookies_from_browser": "",
     "keep_audio": True,
     "chunk_seconds": 20,
@@ -3353,8 +3356,13 @@ def transcribe_chunks(
         print("🔗 英語は2チャンクをまとめて認識し、未完の末尾は次回へ持ち越します。")
     print("📝 専門用語ヒント・文つなぎ・誤字補正: ON")
     print("🛡 異常反復検出・自動再認識: ON")
+    archive_fast_first_pass = bool(CONFIG.get("archive_fast_first_pass", True))
     if archive_accuracy_mode and source_language == "ja":
-        print(f"🎯 アーカイブ精度優先: ON（40秒・2チャンク認識 / {model_name}）")
+        if archive_fast_first_pass:
+            print(f"⚡ アーカイブ高速表示: ON（20秒・1チャンク認識 / {model_name}）")
+            print("🔁 異常反復・未認識区間は条件を変えて自動再認識します。")
+        else:
+            print(f"🎯 アーカイブ精度優先: ON（40秒・2チャンク認識 / {model_name}）")
     if CONFIG.get("speaker_labeling", True):
         detail = "公式問答 + 片山大臣音声プロファイル + 本文推定"
         print(f"👥 話者ラベル: ON（{detail}）")
@@ -3498,7 +3506,11 @@ def transcribe_chunks(
         f.write(f"モデル: {model_name} / プログラム: {APP_VERSION}\n")
         f.write(f"処理装置: {device} / 演算形式: {compute}\n")
         f.write(f"音声言語: {'英語（日本語へ逐次翻訳）' if source_language == 'en' else '日本語'}\n")
-        recognition_chunks = 2 if source_language == "en" or archive_accuracy_mode else 1
+        pair_archive_chunks = (
+            archive_accuracy_mode and source_language == "ja"
+            and not archive_fast_first_pass
+        )
+        recognition_chunks = 2 if source_language == "en" or pair_archive_chunks else 1
         f.write(f"チャンク: {CONFIG['chunk_seconds']}秒 / 認識単位: {recognition_chunks}チャンク\n")
         f.write("専門用語ヒント: ON / 文つなぎ: ON / 誤字補正: ON / 異常反復の自動再認識: ON\n")
         f.write("〇 = 重要な金融発言の候補（自動判定。誤判定・見逃しあり）\n")
@@ -3525,7 +3537,10 @@ def transcribe_chunks(
 
             read_count = 1
             recognition_wav = wav
-            pair_for_accuracy = archive_accuracy_mode and source_language == "ja"
+            pair_for_accuracy = (
+                archive_accuracy_mode and source_language == "ja"
+                and not archive_fast_first_pass
+            )
             if (source_language == "en" or pair_for_accuracy) and wav_ready:
                 after_pair = chunks_dir / f"{next_index + 2:06d}.wav"
                 if following_wav.exists() and (after_pair.exists() or stop_event.is_set()):
