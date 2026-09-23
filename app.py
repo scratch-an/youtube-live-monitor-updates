@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.38"
+APP_VERSION = "7.4.39"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -4108,6 +4108,7 @@ def compare_saved_english_audio():
 
 CHECKER_SEEN_FILE = DATA_DIR / "live_checker_seen.json"
 CHECKER_REPORT_FILE = DATA_DIR / "LIVEチェック_1週間一覧.txt"
+CHECKER_TODAY_FILE = DATA_DIR / "LIVEチェック_本日の予定.txt"
 CHECKER_LATEST_URL_FILE = DATA_DIR / "検出したLIVE_URL.txt"
 
 
@@ -4397,7 +4398,122 @@ def checker_write_report(live_items, upcoming_items, official_items):
             f"  {entry['url']}",
         ])
     CHECKER_REPORT_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    today_lines = [
+        "本日の会見・発言予定",
+        f"更新: {now.strftime('%Y-%m-%d %H:%M:%S JST')}",
+        "=" * 68,
+        "",
+        "【現在配信中】",
+    ]
+    if live_items:
+        for item in live_items:
+            today_lines.extend([
+                f"・{item['person']} / {item['title']}",
+                f"  {item['url']}",
+            ])
+    else:
+        today_lines.append("・現在、対象の配信中LIVEはありません。")
+
+    today_lines.extend(["", "【本日の予約LIVE】"])
+    today_upcoming = [x for x in upcoming_items if not x["start"] or x["start"].startswith(today)]
+    if today_upcoming:
+        for item in today_upcoming:
+            when = f" ({item['start']})" if item["start"] else ""
+            today_lines.extend([
+                f"・{item['person']}{when} / {item['title']}",
+                f"  {item['url']}",
+            ])
+    else:
+        today_lines.append("・本日の予約LIVEはありません。")
+
+    today_lines.extend(["", "【本日の公式予定・テレビ出演候補】"])
+    today_official = [x for x in official_items if x["date"] == today]
+    if today_official:
+        for entry in today_official:
+            mark = "📺" if entry.get("tv") else "・"
+            today_lines.extend([
+                f"{mark} [{entry['source']}] {entry['title']}",
+                f"  {entry['url']}",
+            ])
+    else:
+        today_lines.append("・本日の公式予定は見つかりませんでした。")
+    CHECKER_TODAY_FILE.write_text("\n".join(today_lines) + "\n", encoding="utf-8")
     return lines
+
+
+def checker_schedule_window():
+    """チェック結果から本日分だけを独立ウィンドウに表示する。"""
+    try:
+        import tkinter as tk
+        from tkinter import messagebox, scrolledtext
+    except Exception as e:
+        print(f"⚠️ 本日の予定ウィンドウを開けません: {e}")
+        return
+
+    root = tk.Tk()
+    root.title(f"本日の会見予定 - {APP_VERSION}")
+    root.geometry("920x650")
+    root.minsize(700, 450)
+    header = tk.Label(
+        root, text="本日の会見・発言予定（自動更新）",
+        font=("Yu Gothic UI", 15, "bold"), anchor="w", padx=12, pady=8,
+    )
+    header.pack(fill="x")
+    status = tk.StringVar(value="チェック結果を待っています…")
+    tk.Label(root, textvariable=status, anchor="w", padx=12).pack(fill="x")
+    view = scrolledtext.ScrolledText(
+        root, wrap="word", font=("Yu Gothic UI", 11), padx=10, pady=10
+    )
+    view.pack(fill="both", expand=True, padx=10, pady=8)
+    last_text = {"value": ""}
+
+    def refresh(schedule_next=True):
+        try:
+            content = CHECKER_TODAY_FILE.read_text(encoding="utf-8")
+        except OSError:
+            content = "チェックソフトの初回確認が終わるまでお待ちください。"
+        if content != last_text["value"]:
+            current_y = view.yview()[0]
+            view.delete("1.0", "end")
+            view.insert("1.0", content)
+            view.yview_moveto(current_y)
+            last_text["value"] = content
+            status.set(f"自動更新済み: {datetime.now().strftime('%H:%M:%S')}")
+        if schedule_next:
+            root.after(5000, refresh)
+
+    def copy_latest_url():
+        try:
+            url = CHECKER_LATEST_URL_FILE.read_text(encoding="utf-8").strip()
+        except OSError:
+            url = ""
+        if not url:
+            messagebox.showinfo("LIVE URL", "コピーできる配信中LIVE URLはまだありません。")
+            return
+        root.clipboard_clear()
+        root.clipboard_append(url)
+        status.set("最新の配信中LIVE URLをコピーしました。")
+
+    buttons = tk.Frame(root)
+    buttons.pack(fill="x", padx=10, pady=(0, 10))
+    tk.Button(buttons, text="最新LIVE URLをコピー", command=copy_latest_url).pack(side="left")
+    tk.Button(
+        buttons, text="今すぐ再読込", command=lambda: refresh(False)
+    ).pack(side="left", padx=8)
+    tk.Button(buttons, text="この画面を閉じる", command=root.destroy).pack(side="right")
+    refresh()
+    root.mainloop()
+
+
+def start_checker_schedule_window():
+    """チェック本体とは別プロセスで本日の予定画面を開く。"""
+    try:
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "--checker-window"],
+            cwd=str(APP_DIR),
+        )
+    except Exception as e:
+        print(f"⚠️ 本日の予定ウィンドウを起動できません: {e}")
 
 
 def checker_print_summary(live_items, upcoming_items, official_items):
@@ -4432,6 +4548,7 @@ def checker_main():
     print(f"公式サイト: {official_interval / 60:g}分間隔 / 今日から7日間を一覧化")
     print(f"一覧保存先: {CHECKER_REPORT_FILE}")
     print("終了するときは Ctrl+C を押してください。\n")
+    start_checker_schedule_window()
 
     seen = _checker_load_seen()
     next_live = next_upcoming = next_official = 0.0
@@ -4481,6 +4598,9 @@ def checker_main():
 
 
 def main():
+    if "--checker-window" in sys.argv:
+        checker_schedule_window()
+        return
     ensure_update_only_bat()
     ensure_checker_bat()
     ensure_gpu_setup_bat()
