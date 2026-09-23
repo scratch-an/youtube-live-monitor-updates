@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.41"
+APP_VERSION = "7.4.42"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -368,8 +368,8 @@ DEFAULT_CONFIG = {
     # アーカイブテストへ予約LIVEを入力した場合、開始まで終了せず待機する。
     "archive_wait_for_upcoming_live": True,
     "archive_wait_interval_seconds": 30,
-    # 日本語アーカイブはmediumの精度を維持しつつ、20秒ごとに即時表示する。
-    # OFFにすると従来どおり40秒・2チャンクをまとめて認識する。
+    # 日本語アーカイブは前20秒+新しい20秒を重複認識し、20秒ごとに更新する。
+    # OFFにすると従来どおり非重複の40秒・2チャンク認識に戻す。
     "archive_fast_first_pass": True,
     "cookies_from_browser": "",
     "keep_audio": True,
@@ -553,7 +553,8 @@ WHISPER_PROMPT = (
     "為替市場、為替相場、ファンダメンタルズ、ベッセント財務長官、米国財務省、"
     "日銀、為替介入、日米協調介入、秩序ある為替市場、政策立案者、"
     "ウォールストリート・ジャーナル、ヘッジファンド、原油価格、中東情勢、ホルムズ海峡、"
-    "石油備蓄、代替調達、診療報酬改定、介護報酬改定、一般会計、新規国債発行額、公債依存度、"
+    "石油備蓄、代替調達、物流の要衝、国際公共財、自由で安全な航行、国際海事機関、IMO、"
+    "イラン情勢、早期沈静化、診療報酬改定、介護報酬改定、一般会計、新規国債発行額、公債依存度、"
     "ガソリン税、軽油引取税、物価高騰対策、"
     "歳出改革努力、歳出及び歳入、概算要求、当初予算要求、大胆な投資、国債費、対前年度、補正予算、"
     "政策当局、独立性、ダイモン会長、同博覧会、日本の原産植物。"
@@ -721,6 +722,20 @@ VIDEO_TEXT_CORRECTIONS = {
         ("リフレー制作", "リフレ政策"),
         ("これらはアベノミクスにおいて", "彼らはアベノミクスにおいて"),
         ("今はそれを終えて、リフレ政策を", "今はそれを終えて、そして、そのリフレ政策を"),
+    ],
+    "U-w6xV7k8eM": [
+        ("物流の養生", "物流の要衝"),
+        ("国債公共債", "国際公共財"),
+        ("自由で安全な高校", "自由で安全な航行"),
+        ("国債開示機関", "国際海事機関"),
+        ("国債社会", "国際社会"),
+        ("国債会議", "国際会議"),
+        ("生み出て所属", "挙手して所属と名前を名乗ってください。"),
+        ("最前列の一番通路につき方", "最前列の一番通路に近い方"),
+        ("質問を受けします", "質問をお受けします"),
+        ("事実審美術大臣", "時事通信、水谷さん"),
+        ("早期沈静化、安定化が図られています", "早期沈静化、安定化が図られることです"),
+        ("私たちはこの軍事的な緊張", "イラン情勢につきましては、軍事的な緊張"),
     ],
     "oEqKmehjjvA": [
         ("ホルムズ会計", "ホルムズ海峡"),
@@ -1823,7 +1838,22 @@ def normalize_text(text, video_id=None):
 
     # よく起きる句読点なしの連結を補正。
     text = text.replace("高騰する中国民", "高騰する中、国民")
+    # 日本語文末へ単独で混入した「z」等の1文字だけの英字を除去する。
+    text = re.sub(r"(?<=[ぁ-んァ-ヶ一-龠。、！？])\s+[A-Za-z]\s*$", "", text)
     return text
+
+
+def remove_boundary_overlap(previous_text, new_text, minimum=6, maximum=100):
+    """重複認識窓で、前の末尾と新しい先頭が同じ部分だけを除く。"""
+    previous = str(previous_text or "").strip()
+    current = str(new_text or "").strip()
+    if not previous or not current:
+        return current
+    limit = min(maximum, len(previous), len(current))
+    for size in range(limit, minimum - 1, -1):
+        if previous[-size:] == current[:size]:
+            return current[size:].lstrip(" 、,。")
+    return current
 
 
 def repetition_score(text):
@@ -1850,6 +1880,13 @@ def repetition_score(text):
 
 
 def looks_hallucinated(text):
+    if any(phrase in text for phrase in (
+        "ビデオを見てくれてありがとう",
+        "ご視聴ありがとうございました ご視聴ありがとうございました",
+    )):
+        return True
+    if len(re.findall(r"国際条例", text)) >= 3:
+        return True
     # 英語の長い文や二文一組の反復も検出する。
     sentences = [re.sub(r"\s+", " ", x).strip().casefold()
                  for x in re.split(r"[。！？.!?]+", text) if x.strip()]
@@ -2957,6 +2994,16 @@ def infer_speaker(text, previous_speaker, official_speaker):
         "大臣の方から冒頭", "大臣から冒頭",
     )):
         return "記者"
+    # 内外記者会見で質問者を案内・指名する進行役は、利用者の表記方針に
+    # 合わせて「記者」とする（高市総理の発言にはしない）。
+    press_moderator_cues = (
+        "外国プレスの方から質問", "日本のプレスの方から質問",
+        "質問を希望される方", "ヘッドセットをご利用",
+        "最前列の一番通路", "もう一問外国プレス",
+        "時事通信、水谷さん", "記者会見を終了します",
+    )
+    if any(x in t for x in press_moderator_cues):
+        return "記者"
     # 会見での所属・氏名の自己紹介は、音声認識が質問末尾を崩しても
     # 最も信頼できる記者開始の合図になる。
     reporter_intro = bool(re.search(
@@ -3359,8 +3406,8 @@ def transcribe_chunks(
     archive_fast_first_pass = bool(CONFIG.get("archive_fast_first_pass", True))
     if archive_accuracy_mode and source_language == "ja":
         if archive_fast_first_pass:
-            print(f"⚡ アーカイブ高速表示: ON（20秒・1チャンク認識 / {model_name}）")
-            print("🔁 異常反復・未認識区間は条件を変えて自動再認識します。")
+            print(f"⚡ アーカイブ高速表示: ON（20秒更新・40秒重複認識 / {model_name}）")
+            print("🔁 前20秒を文脈として使い、異常区間は条件を変えて自動再認識します。")
         else:
             print(f"🎯 アーカイブ精度優先: ON（40秒・2チャンク認識 / {model_name}）")
     if CONFIG.get("speaker_labeling", True):
@@ -3427,6 +3474,7 @@ def transcribe_chunks(
     manual_ranges = speaker_ranges_for(video_id)
     official_speaker = official_speaker or CONFIG.get("archive_official_speakers", {}).get(video_id) or CONFIG.get("default_official_speaker", "高市総理")
     voice_profiles = {}
+    conference_end_detected = False
 
     def submit_post_text(text, language, speaker=None, force=False):
         nonlocal post_buffer, post_buffer_speaker
@@ -3510,8 +3558,12 @@ def transcribe_chunks(
             archive_accuracy_mode and source_language == "ja"
             and not archive_fast_first_pass
         )
-        recognition_chunks = 2 if source_language == "en" or pair_archive_chunks else 1
-        f.write(f"チャンク: {CONFIG['chunk_seconds']}秒 / 認識単位: {recognition_chunks}チャンク\n")
+        if archive_accuracy_mode and source_language == "ja" and archive_fast_first_pass:
+            recognition_description = "2チャンク重複認識・20秒更新"
+        else:
+            recognition_chunks = 2 if source_language == "en" or pair_archive_chunks else 1
+            recognition_description = f"{recognition_chunks}チャンク"
+        f.write(f"チャンク: {CONFIG['chunk_seconds']}秒 / 認識単位: {recognition_description}\n")
         f.write("専門用語ヒント: ON / 文つなぎ: ON / 誤字補正: ON / 異常反復の自動再認識: ON\n")
         f.write("〇 = 重要な金融発言の候補（自動判定。誤判定・見逃しあり）\n")
         f.write("話者ラベル: タイトル判定・本文推定・軽量声質補助（最終確認を推奨）\n\n")
@@ -3537,6 +3589,8 @@ def transcribe_chunks(
 
             read_count = 1
             recognition_wav = wav
+            recognition_audio_offset = total_offset
+            output_audio_floor = None
             pair_for_accuracy = (
                 archive_accuracy_mode and source_language == "ja"
                 and not archive_fast_first_pass
@@ -3552,6 +3606,19 @@ def transcribe_chunks(
                     )
                 elif not stop_event.is_set():
                     wav_ready = False
+
+            # 高速表示では、最初だけ20秒で認識する。2回目以降は
+            # 「前20秒+新しい20秒」の40秒窓を使い、新しい側だけを出力する。
+            if (
+                archive_accuracy_mode and source_language == "ja"
+                and archive_fast_first_pass and next_index > 0 and wav_ready
+            ):
+                previous_wav = chunks_dir / f"{next_index - 1:06d}.wav"
+                if previous_wav.exists():
+                    recognition_wav = chunks_dir.parent / "日本語高速表示用_重複2チャンク.wav"
+                    concatenate_comparison_audio([previous_wav, wav], recognition_wav)
+                    recognition_audio_offset = total_offset - float(CONFIG["chunk_seconds"])
+                    output_audio_floor = total_offset
 
             if wav_ready:
                 try:
@@ -3574,6 +3641,15 @@ def transcribe_chunks(
 
                     recognized_pieces = []
                     for s in segments:
+                        segment_start = recognition_audio_offset + s.start
+                        segment_end = recognition_audio_offset + s.end
+                        # 重複窓の前半は前回すでに出力済み。境界をまたぐ発言は
+                        # 中点が新しい側にある場合だけ残し、重複投稿を防ぐ。
+                        if (
+                            output_audio_floor is not None
+                            and (segment_start + segment_end) / 2.0 < output_audio_floor
+                        ):
+                            continue
                         raw_segment = normalize_text(s.text, video_id)
                         reference_speaker = None
                         current_reference = official_reference
@@ -3594,8 +3670,6 @@ def transcribe_chunks(
                             raw_segment = normalize_text(raw_segment, video_id)
                         if not raw_segment:
                             continue
-                        segment_start = total_offset + s.start
-                        segment_end = total_offset + s.end
                         parts = split_speaker_turn_text(raw_segment)
                         total_chars = max(1, sum(len(part) for part in parts))
                         cursor = segment_start
@@ -3607,15 +3681,15 @@ def transcribe_chunks(
                                 piece_end = min(segment_end, cursor + (segment_end - segment_start) * fraction)
                             signature = voice_signature(
                                 recognition_wav,
-                                max(0.0, cursor - total_offset),
-                                max(0.0, piece_end - total_offset),
+                                max(0.0, cursor - recognition_audio_offset),
+                                max(0.0, piece_end - recognition_audio_offset),
                             )
                             katayama_score = None
                             if source_language == "ja" and "片山" in str(official_speaker):
                                 katayama_score = katayama_voice_score(
                                     recognition_wav,
-                                    max(0.0, cursor - total_offset),
-                                    max(0.0, piece_end - total_offset),
+                                    max(0.0, cursor - recognition_audio_offset),
+                                    max(0.0, piece_end - recognition_audio_offset),
                                 )
                             recognized_pieces.append((
                                 part, cursor, piece_end, signature,
@@ -3625,6 +3699,11 @@ def transcribe_chunks(
 
                     for piece in recognized_pieces:
                         raw, start, end, signature = piece[:4]
+                        if (
+                            archive_accuracy_mode
+                            and re.search(r"(?:内外)?記者会見を終了", raw)
+                        ):
+                            conference_end_detected = True
                         reference_speaker = piece[4] if len(piece) > 4 else None
                         katayama_score = piece[5] if len(piece) > 5 else None
                         manual_speaker = speaker_from_manual_ranges(
@@ -3682,6 +3761,7 @@ def transcribe_chunks(
                                 pending_end = end
                                 pending_speaker = candidate_speaker
                             else:
+                                raw = remove_boundary_overlap(pending_text, raw)
                                 pending_text = normalize_text(pending_text + " " + raw, video_id)
                                 pending_end = end
 
@@ -3697,6 +3777,19 @@ def transcribe_chunks(
                     total_offset += read_count * float(CONFIG["chunk_seconds"])
                     failed_attempts.pop(next_index, None)
                     next_index += read_count
+                    if conference_end_detected:
+                        if pending_text:
+                            emit(
+                                f, pending_start or 0,
+                                pending_end or pending_start or 0,
+                                pending_text, pending_speaker,
+                            )
+                            pending_text = ""
+                            pending_start = pending_end = None
+                            pending_speaker = None
+                        print("⏹ 会見終了を検出したため、再放送を待たず文字起こしを終了します。")
+                        stop_event.set()
+                        break
                     continue
                 except Exception as e:
                     failed_attempts[next_index] = failed_attempts.get(next_index, 0) + 1
