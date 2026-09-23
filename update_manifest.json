@@ -1,7 +1,7 @@
 {
-  "version": "7.4.37",
+  "version": "7.4.38",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.37.py",
-  "sha256": "21acd7a30e63d3610fb3a44de4c3eb29a3f03217c470d90a17ba6cf4bb594d85",
-  "notes": "LIVEチェック専用ソフトの除外判定を強化。リプレイ、見逃し配信、ニュースまとめ、政治ライブまとめ、ノーカット再配信を除外し、本物の予約記者会見は維持。外務省等の公式ページ取得用ブラウザ情報も改善。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.38.py",
+  "sha256": "4120ba6a740687230aec03b9123c929e788a55ea9885cf51895e8707b50719de",
+  "notes": "公式予定一覧の誤日付とメニュー混入を修正。日銀予定は表の行単位で抽出し、403になる外務省会見ページを公式新着情報へ切り替え。過去の会見は表示せず、今日から7日間の予定だけを表示。"
 }
