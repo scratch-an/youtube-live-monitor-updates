@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.42"
+APP_VERSION = "7.4.43"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -356,8 +356,8 @@ DEFAULT_CONFIG = {
     "region_code": "JP",
     "language": "ja",
     "transcription_model": "small",
-    # GPUで日本語アーカイブを精度優先処理するときだけmediumを使う。
-    # CPUへ切り替わった場合は従来どおりsmallを使い、極端な遅延を避ける。
+    # GPUで日本語を処理するときはmediumを使う。CPUへ切り替わった場合は
+    # 従来どおりsmallを使い、極端な遅延を避ける。
     "gpu_archive_transcription_model": "medium",
     "english_transcription_model": "medium",
     # NVIDIA GPUを優先する。CTranslate2で初期化できない場合だけCPUへ戻す。
@@ -368,9 +368,11 @@ DEFAULT_CONFIG = {
     # アーカイブテストへ予約LIVEを入力した場合、開始まで終了せず待機する。
     "archive_wait_for_upcoming_live": True,
     "archive_wait_interval_seconds": 30,
-    # 日本語アーカイブは前20秒+新しい20秒を重複認識し、20秒ごとに更新する。
-    # OFFにすると従来どおり非重複の40秒・2チャンク認識に戻す。
-    "archive_fast_first_pass": True,
+    # 現在のGPUでリアルタイム処理に追いつく、日本語用のバランス設定。
+    # 7.4.42の40秒重複認識は処理量が約2倍になったため通常は使わない。
+    "japanese_balanced_chunk_seconds": 30,
+    "archive_balanced_single_chunk": True,
+    "archive_fast_first_pass": False,
     "cookies_from_browser": "",
     "keep_audio": True,
     "chunk_seconds": 20,
@@ -446,6 +448,7 @@ DEFAULT_CONFIG = {
     "default_official_speaker": "高市総理",
     "archive_official_speakers": {
         "oEqKmehjjvA": "高市総理",
+        "S_ttcdeinE8": "高市総理",
         "SmIRQKIuCEw": "片山財務大臣",
         "mzklpHRM4m8": "植田和男 日銀総裁",
         "TuI4euaLfuE": "片山財務大臣",
@@ -550,6 +553,7 @@ WHISPER_PROMPT = (
     "閣議後記者会見、幹事社、2027年国際園芸博覧会、"
     "国際連合、国連総会、一般討論演説、ニューヨーク、国連改革、多国間主義、"
     "安全保障理事会、常任理事国、グテーレス国連事務総長、日本の国連加盟70周年、"
+    "多国間主義、FOIP、ICJ、ICC、ITLOS、判事を輩出、邦人職員、国際防災協力担当大臣、"
     "為替市場、為替相場、ファンダメンタルズ、ベッセント財務長官、米国財務省、"
     "日銀、為替介入、日米協調介入、秩序ある為替市場、政策立案者、"
     "ウォールストリート・ジャーナル、ヘッジファンド、原油価格、中東情勢、ホルムズ海峡、"
@@ -585,6 +589,42 @@ TEXT_CORRECTIONS = [
     ("保管党在寄金制度", "補完当座預金制度"),
     ("適用理理", "適用利率"),
     ("基準貸付履歴", "基準貸付利率"),
+    ("国連課名", "国連加盟"),
+    ("ホホイップ", "FOIP"),
+    ("ホイップ", "FOIP"),
+    ("フォイプ", "FOIP"),
+    ("ポイプ", "FOIP"),
+    ("ITROS", "ITLOS"),
+    ("一貫して指示し、判事を廃止", "一貫して支持し、判事を輩出"),
+    ("判事を輩出として", "判事を輩出して"),
+    ("他国間衆議会", "多国間主義へのコミットメントについて"),
+    ("他国間主義", "多国間主義"),
+    ("日本の試験や技術", "日本の知見や技術"),
+    ("貢献する医師", "貢献する意思"),
+    ("グテイレス", "グテーレス"),
+    ("プテイリス", "グテーレス"),
+    ("法人職員の増強", "邦人職員の増強"),
+    ("ai反動体", "AI・半導体"),
+    ("AI反動体", "AI・半導体"),
+    ("アセアン", "ASEAN"),
+    ("エペク", "APEC"),
+    ("選手防衛", "専守防衛"),
+    ("国債社会", "国際社会"),
+    ("社意", "謝意"),
+    ("ではでは", "では"),
+    ("ではじゃあ", "では"),
+    ("自由で安全な高校", "自由で安全な航行"),
+    ("日本は世界一の防災対策を目指", "日本は世界一の防災大国を目指"),
+    ("中途情勢", "中東情勢"),
+    ("現有調達多角化", "原油調達多角化"),
+    ("参加格闘", "参加各党"),
+    ("おおむね格闘", "おおむね各党"),
+    ("過急的", "可及的"),
+    ("衆議院議事選挙", "衆議院議員選挙"),
+    ("年率の拡大", "連立の拡大"),
+    ("週に以来", "就任以来"),
+    ("g 通信", "時事通信"),
+    ("G 通信", "時事通信"),
 ]
 
 # 特定アーカイブでユーザーが確認した訂正。
@@ -736,6 +776,13 @@ VIDEO_TEXT_CORRECTIONS = {
         ("事実審美術大臣", "時事通信、水谷さん"),
         ("早期沈静化、安定化が図られています", "早期沈静化、安定化が図られることです"),
         ("私たちはこの軍事的な緊張", "イラン情勢につきましては、軍事的な緊張"),
+    ],
+    "S_ttcdeinE8": [
+        ("意志添えに", "礎に"),
+        ("一貫して指示し、判事を排出", "一貫して支持し、判事を輩出"),
+        ("働きかけ ありがとうございました", "働きかけました"),
+        ("AI・半導体重要 鉱物", "AI・半導体・重要鉱物"),
+        ("進化したFOIPのもとで、エネルギー・重要物資のサプライチェーンを強靭化するために、 現在、湾岸諸国", "進化したFOIPのもとで、エネルギー・重要物資のサプライチェーンを強靱化するために、パワー・アジアに加えて、現在、湾岸諸国"),
     ],
     "oEqKmehjjvA": [
         ("ホルムズ会計", "ホルムズ海峡"),
@@ -1883,6 +1930,9 @@ def looks_hallucinated(text):
     if any(phrase in text for phrase in (
         "ビデオを見てくれてありがとう",
         "ご視聴ありがとうございました ご視聴ありがとうございました",
+        "最後まで視聴してくださって",
+        "最後までご視聴いただき",
+        "本当にありがとうございます 今回の会談で",
     )):
         return True
     if len(re.findall(r"国際条例", text)) >= 3:
@@ -2605,7 +2655,7 @@ def split_for_chat(text, prefix):
         cut = -1
         # まず文末を探す。なければ読点を後ろから調べ、数値・専門語・
         # 接続表現の途中になる位置を避ける。
-        for marks in (("。", "！", "？", ".", "!", "?"), ("、", ",", ";", " ")):
+        for marks in (("。", "！", "？", ".", "!", "?"),):
             candidates = sorted(
                 {
                     match.start()
@@ -2627,6 +2677,42 @@ def split_for_chat(text, prefix):
                 break
             if cut > 0:
                 break
+        # 文末記号が上限内にない場合は、「また」「そして」などを
+        # 次の投稿の冒頭へ移し、前の投稿末尾へ置き去りにしない。
+        if cut < 0:
+            connective_positions = [
+                match.start()
+                for match in re.finditer(
+                    r"\s+(?=(?:また|そして|その上で|一方|続いて|さらに|なお)[、,]?)",
+                    remaining[:body_limit],
+                )
+                if match.start() >= body_limit // 2
+            ]
+            if connective_positions:
+                cut = connective_positions[-1]
+        if cut < 0:
+            for marks in (("、", ",", ";", " "),):
+                candidates = sorted(
+                    {
+                        match.start()
+                        for mark in marks
+                        for match in re.finditer(re.escape(mark), remaining[:body_limit])
+                    },
+                    reverse=True,
+                )
+                for position in candidates:
+                    if position < body_limit // 2:
+                        continue
+                    after = remaining[position + 1:].lstrip()
+                    before = remaining[:position].rstrip()
+                    if re.match(r"^[0-9０-９.%％]", after):
+                        continue
+                    if before.endswith(("と", "及び", "および", "また", "消費税", "税率", "金利")):
+                        continue
+                    cut = position + 1
+                    break
+                if cut > 0:
+                    break
         if cut < 0:
             cut = body_limit
             # 英数字・数値・単位の連続部分を真ん中で切らない。
@@ -2651,7 +2737,15 @@ def split_for_chat(text, prefix):
             pieces[-2:] = [combined]
     if len(pieces) <= 1:
         return [f"{prefix}{pieces[0]}"] if pieces else []
-    return [f"{prefix}({i}/{len(pieces)}) {piece}" for i, piece in enumerate(pieces, 1)]
+    total = len(pieces)
+    # 発言者名・重要印・翻訳見出しは最初の投稿だけに付ける。
+    # 続きは全会見・全話者・全言語で (2/N) 以降の番号だけに統一する。
+    messages = [f"{prefix}(1/{total}) {pieces[0]}"]
+    messages.extend(
+        f"({index}/{total}) {piece}"
+        for index, piece in enumerate(pieces[1:], 2)
+    )
+    return messages
 
 
 def post_candidate_is_safe(text):
@@ -2970,11 +3064,18 @@ def split_speaker_turn_text(text):
     t = re.sub(r"\s+", " ", str(text)).strip()
     if not t:
         return []
+    t = re.sub(
+        r"(ありがとうございます)[。 ]*(?=それでは[、,]?皆様からの質問)",
+        r"\1。", t,
+    )
     # 文末直後に現れる、会見で信頼度の高い話者交代の合図だけを使う。
     # 通常の「はい」すべてでは分けず、本文中の誤分割を避ける。
     pattern = (
         r"(?<=[。！？?])\s*(?="
         r"幹事社|"
+        r"お疲れ様でございます|"
+        r"それでは[、,]?皆様からの質問|"
+        r"まず[、,]?日本のプレスから質問|"
         r"はい[、,]?\s*(?:まず冒頭|その報道|ありがとうございます|原則は)|"
         r"はい[、,]?\s*ありがとうございました|"
         r"申し訳ありません"
@@ -2992,6 +3093,7 @@ def infer_speaker(text, previous_speaker, official_speaker):
     if any(x in t for x in (
         "それでは、時間ですので", "それでは時間ですので",
         "大臣の方から冒頭", "大臣から冒頭",
+        "ただいまより、高市総理大臣による", "ただいまより高市総理大臣による",
     )):
         return "記者"
     # 内外記者会見で質問者を案内・指名する進行役は、利用者の表記方針に
@@ -3001,6 +3103,9 @@ def infer_speaker(text, previous_speaker, official_speaker):
         "質問を希望される方", "ヘッドセットをご利用",
         "最前列の一番通路", "もう一問外国プレス",
         "時事通信、水谷さん", "記者会見を終了します",
+        "皆様からの質問をお受け", "日本のプレスから質問のある方",
+        "私が指名しますので", "スタンドマイクの前",
+        "所属と名前を名乗って", "NHK小島さん",
     )
     if any(x in t for x in press_moderator_cues):
         return "記者"
@@ -3018,7 +3123,8 @@ def infer_speaker(text, previous_speaker, official_speaker):
     # 質問が終わった直後の「はい」や回答定型句を、質問者の続きにしない。
     answer_start = bool(re.match(
         r"^(?:はい(?:[、。]|\s)|ありがとうございます|今般の|今日の大綱|"
-        r"その報道|その件|これはどちらか|いずれにしても|原則は)",
+        r"その報道|その件|これはどちらか|いずれにしても|原則は|"
+        r"お疲れ様でございます)",
         t,
     ))
     if "記者" in previous and answer_start:
@@ -3033,7 +3139,7 @@ def infer_speaker(text, previous_speaker, official_speaker):
 
     reporter_cues = (
         "伺います", "お伺い", "お聞きします", "お聞かせください", "教えてください", "でしょうか",
-        "ですか", "お願いします", "冒頭少し重複", "確認ですが", "お尋ね",
+        "お願いします", "冒頭少し重複", "確認ですが", "お尋ね",
         "と申します", "どのようにお考え", "見解を", "改めて伺",
         "幹事社", "私から質問", "私の質問", "それでは大臣",
         "ありがとうございました。それでは"
@@ -3052,6 +3158,8 @@ def infer_speaker(text, previous_speaker, official_speaker):
         x for x in reporter_cues if x not in ("お願いします",)
     )
     if any(x in t for x in strong_reporter_cues):
+        return "記者"
+    if re.search(r"(?:ですか|でしょうか)[。！？?]*$", t):
         return "記者"
     if any(x in t for x in official_cues):
         return official_speaker
@@ -3224,7 +3332,7 @@ def assist_speaker_by_voice(candidate, previous_speaker, signature, profiles, of
     return candidate
 
 
-def start_stream_to_chunks(url, out_dir, stop_event, from_start=True):
+def start_stream_to_chunks(url, out_dir, stop_event, from_start=True, chunk_seconds=None):
     chunks = out_dir / "chunks"
     chunks.mkdir(parents=True, exist_ok=True)
     ffmpeg_exe = find_ffmpeg()
@@ -3240,7 +3348,11 @@ def start_stream_to_chunks(url, out_dir, stop_event, from_start=True):
     if browser:
         yt_cmd += ["--cookies-from-browser", browser]
     yt_cmd.append(url)
-    seconds = max(10, int(CONFIG.get("chunk_seconds", 20)))
+    seconds = max(10, int(
+        chunk_seconds
+        if chunk_seconds is not None
+        else CONFIG.get("chunk_seconds", 20)
+    ))
     ff_cmd = [
         ffmpeg_exe, "-hide_banner", "-loglevel", "warning",
         "-i", "pipe:0", "-vn", "-ac", "1", "-ar", "16000",
@@ -3365,6 +3477,7 @@ def transcribe_chunks(
     official_speaker=None, source_language="ja", pause_event=None,
     archive_accuracy_mode=False, official_reference="",
     live_reference_video_id=None,
+    chunk_seconds=None,
 ):
     from faster_whisper import WhisperModel
 
@@ -3395,7 +3508,7 @@ def transcribe_chunks(
         if source_language == "en" else CONFIG["transcription_model"]
     )
     model_name = base_model_name
-    if device == "cuda" and archive_accuracy_mode and source_language == "ja":
+    if device == "cuda" and source_language == "ja":
         model_name = str(CONFIG.get("gpu_archive_transcription_model", "medium"))
     print(f"🧠 Whisperモデルを読み込み中: {model_name} ({device})")
     if source_language == "en":
@@ -3403,13 +3516,30 @@ def transcribe_chunks(
         print("🔗 英語は2チャンクをまとめて認識し、未完の末尾は次回へ持ち越します。")
     print("📝 専門用語ヒント・文つなぎ・誤字補正: ON")
     print("🛡 異常反復検出・自動再認識: ON")
-    archive_fast_first_pass = bool(CONFIG.get("archive_fast_first_pass", True))
+    chunk_seconds = max(10, int(
+        chunk_seconds
+        if chunk_seconds is not None
+        else CONFIG.get("chunk_seconds", 20)
+    ))
+    archive_balanced_mode = bool(
+        archive_accuracy_mode and source_language == "ja"
+        and CONFIG.get("archive_balanced_single_chunk", True)
+    )
+    archive_fast_first_pass = bool(
+        CONFIG.get("archive_fast_first_pass", False)
+        and not archive_balanced_mode
+    )
     if archive_accuracy_mode and source_language == "ja":
-        if archive_fast_first_pass:
+        if archive_balanced_mode:
+            print(f"⚖️ アーカイブ・バランス処理: ON（{chunk_seconds}秒・1チャンク認識 / {model_name}）")
+            print("🔁 異常反復・明らかな欠落だけ、条件を変えて自動再認識します。")
+        elif archive_fast_first_pass:
             print(f"⚡ アーカイブ高速表示: ON（20秒更新・40秒重複認識 / {model_name}）")
             print("🔁 前20秒を文脈として使い、異常区間は条件を変えて自動再認識します。")
         else:
             print(f"🎯 アーカイブ精度優先: ON（40秒・2チャンク認識 / {model_name}）")
+    elif source_language == "ja":
+        print(f"⚖️ 日本語リアルタイム・バランス処理: ON（{chunk_seconds}秒・1チャンク認識 / {model_name}）")
     if CONFIG.get("speaker_labeling", True):
         detail = "公式問答 + 片山大臣音声プロファイル + 本文推定"
         print(f"👥 話者ラベル: ON（{detail}）")
@@ -3558,12 +3688,14 @@ def transcribe_chunks(
             archive_accuracy_mode and source_language == "ja"
             and not archive_fast_first_pass
         )
-        if archive_accuracy_mode and source_language == "ja" and archive_fast_first_pass:
+        if archive_balanced_mode:
+            recognition_description = "1チャンク・バランス認識"
+        elif archive_accuracy_mode and source_language == "ja" and archive_fast_first_pass:
             recognition_description = "2チャンク重複認識・20秒更新"
         else:
             recognition_chunks = 2 if source_language == "en" or pair_archive_chunks else 1
             recognition_description = f"{recognition_chunks}チャンク"
-        f.write(f"チャンク: {CONFIG['chunk_seconds']}秒 / 認識単位: {recognition_description}\n")
+        f.write(f"チャンク: {chunk_seconds}秒 / 認識単位: {recognition_description}\n")
         f.write("専門用語ヒント: ON / 文つなぎ: ON / 誤字補正: ON / 異常反復の自動再認識: ON\n")
         f.write("〇 = 重要な金融発言の候補（自動判定。誤判定・見逃しあり）\n")
         f.write("話者ラベル: タイトル判定・本文推定・軽量声質補助（最終確認を推奨）\n\n")
@@ -3593,7 +3725,7 @@ def transcribe_chunks(
             output_audio_floor = None
             pair_for_accuracy = (
                 archive_accuracy_mode and source_language == "ja"
-                and not archive_fast_first_pass
+                and not archive_fast_first_pass and not archive_balanced_mode
             )
             if (source_language == "en" or pair_for_accuracy) and wav_ready:
                 after_pair = chunks_dir / f"{next_index + 2:06d}.wav"
@@ -3617,7 +3749,7 @@ def transcribe_chunks(
                 if previous_wav.exists():
                     recognition_wav = chunks_dir.parent / "日本語高速表示用_重複2チャンク.wav"
                     concatenate_comparison_audio([previous_wav, wav], recognition_wav)
-                    recognition_audio_offset = total_offset - float(CONFIG["chunk_seconds"])
+                    recognition_audio_offset = total_offset - float(chunk_seconds)
                     output_audio_floor = total_offset
 
             if wav_ready:
@@ -3629,7 +3761,7 @@ def transcribe_chunks(
                     )
 
                     if retried and not segments:
-                        end_offset = total_offset + read_count * float(CONFIG["chunk_seconds"])
+                        end_offset = total_offset + read_count * float(chunk_seconds)
                         f.write(f"[{fmt(total_offset)} - {fmt(end_offset)}] 【認識保留】再認識後も異常反復のため出力を保留。元音声: {wav.name}から{read_count}チャンク\n")
                         f.flush()
                         # 保留区間の前後を一つの発言として結合しない。
@@ -3699,10 +3831,7 @@ def transcribe_chunks(
 
                     for piece in recognized_pieces:
                         raw, start, end, signature = piece[:4]
-                        if (
-                            archive_accuracy_mode
-                            and re.search(r"(?:内外)?記者会見を終了", raw)
-                        ):
+                        if re.search(r"(?:内外)?記者会見を終了", raw):
                             conference_end_detected = True
                         reference_speaker = piece[4] if len(piece) > 4 else None
                         katayama_score = piece[5] if len(piece) > 5 else None
@@ -3774,7 +3903,7 @@ def transcribe_chunks(
                             pending_start = pending_end = None
                             pending_speaker = None
 
-                    total_offset += read_count * float(CONFIG["chunk_seconds"])
+                    total_offset += read_count * float(chunk_seconds)
                     failed_attempts.pop(next_index, None)
                     next_index += read_count
                     if conference_end_detected:
@@ -3796,7 +3925,7 @@ def transcribe_chunks(
                     # 配信終了後も壊れた最終ファイルで永久待機しない。
                     if stop_event.is_set() and failed_attempts[next_index] >= 3:
                         print(f"⚠️ 読み取れないチャンクをスキップ: {wav.name} ({e})")
-                        total_offset += float(CONFIG["chunk_seconds"])
+                        total_offset += float(chunk_seconds)
                         next_index += 1
                         continue
                     print(f"⏳ WAV完成待ち {wav.name}: {e}")
@@ -3995,6 +4124,15 @@ def process_url(url, title="YouTube Archive"):
     if not wait_for_archive_live_start(url):
         return
 
+    archive_language, archive_speaker, detected_title = archive_language_and_speaker(
+        url, title, video_id
+    )
+    archive_chunk_seconds = (
+        max(10, int(CONFIG.get("japanese_balanced_chunk_seconds", 30)))
+        if archive_language == "ja"
+        else max(10, int(CONFIG.get("chunk_seconds", 20)))
+    )
+
     pause_event = threading.Event()
     window_closed = start_post_assistant_window(pause_event=pause_event)
     stop_event = threading.Event()
@@ -4002,7 +4140,10 @@ def process_url(url, title="YouTube Archive"):
 
     def stream_worker():
         try:
-            start_stream_to_chunks(url, out_dir, stop_event, from_start=False)
+            start_stream_to_chunks(
+                url, out_dir, stop_event, from_start=False,
+                chunk_seconds=archive_chunk_seconds,
+            )
         except Exception as e:
             result["error"] = e
             print("Audio stream error:", e)
@@ -4013,9 +4154,6 @@ def process_url(url, title="YouTube Archive"):
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        archive_language, archive_speaker, detected_title = archive_language_and_speaker(
-            url, title, video_id
-        )
         official_reference = fetch_official_archive_reference(video_id, out_dir=out_dir)
         if result["error"] and not any(chunks_dir.glob("*.wav")):
             print("⏹ 音声取得に失敗したため、Whisperの読み込みを省略します。")
@@ -4027,6 +4165,7 @@ def process_url(url, title="YouTube Archive"):
             pause_event=pause_event,
             archive_accuracy_mode=True,
             official_reference=official_reference,
+            chunk_seconds=archive_chunk_seconds,
         )
         if result["error"]:
             print("Audio stream error:", result["error"])
@@ -4068,6 +4207,11 @@ def process_conference(item, active, processed, event_type="live"):
 
     url = f"https://www.youtube.com/watch?v={vid}"
     source_language = "en" if "ベッセント" in person else "ja"
+    transcription_chunk_seconds = (
+        max(10, int(CONFIG.get("japanese_balanced_chunk_seconds", 30)))
+        if source_language == "ja"
+        else max(10, int(CONFIG.get("chunk_seconds", 20)))
+    )
 
     # 予約Liveは通知だけ行い、配信開始前の音声取得は始めない。
     if event_type == "upcoming":
@@ -4120,7 +4264,10 @@ def process_conference(item, active, processed, event_type="live"):
 
     def stream_worker():
         try:
-            start_stream_to_chunks(url, out_dir, stop_event)
+            start_stream_to_chunks(
+                url, out_dir, stop_event,
+                chunk_seconds=transcription_chunk_seconds,
+            )
         except Exception as e:
             result["error"] = e
             print("❌ 音声ストリームエラー:", e)
@@ -4135,6 +4282,7 @@ def process_conference(item, active, processed, event_type="live"):
             chunks_dir, txt_path, stop_event, title, vid,
             official_speaker=person, source_language=source_language,
             live_reference_video_id=vid,
+            chunk_seconds=transcription_chunk_seconds,
         )
 
         if manual_stop_event.is_set():
@@ -4841,7 +4989,11 @@ def main():
     print("イベント日: 24時間・配信中Liveを15分間隔（予約検索は起動時のみ）")
     if CONFIG.get("enable_bessent_monitoring", False):
         print("海外主要チャンネル: 2分間隔の直接監視（検索API漏れ対策）")
-    print(f"文字起こしチャンク: {CONFIG['chunk_seconds']}秒")
+    print(
+        "文字起こしチャンク: "
+        f"日本語{CONFIG.get('japanese_balanced_chunk_seconds', 30)}秒 / "
+        f"英語{CONFIG.get('chunk_seconds', 20)}秒"
+    )
     if CONFIG.get("openai_translation_enabled", True):
         usage = load_openai_usage()
         limit = float(CONFIG.get("monthly_translation_budget_jpy", 1500))
