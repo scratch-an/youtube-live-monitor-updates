@@ -1,7 +1,7 @@
 {
-  "version": "7.4.38",
+  "version": "7.4.39",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.38.py",
-  "sha256": "4120ba6a740687230aec03b9123c929e788a55ea9885cf51895e8707b50719de",
-  "notes": "公式予定一覧の誤日付とメニュー混入を修正。日銀予定は表の行単位で抽出し、403になる外務省会見ページを公式新着情報へ切り替え。過去の会見は表示せず、今日から7日間の予定だけを表示。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.39.py",
+  "sha256": "d94a8ce86debaf354bd88d4dd5bf6298182298837968b70ba1ee274b539eb65d",
+  "notes": "LIVEチェック専用ソフトの起動時に、本日の配信中LIVE・予約LIVE・公式予定・テレビ出演候補だけを表示する専用ウィンドウを追加。表示は自動更新され、最新LIVE URLをコピー可能。"
 }
