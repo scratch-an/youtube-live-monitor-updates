@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.37"
+APP_VERSION = "7.4.38"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -286,7 +286,7 @@ DEFAULT_CONFIG = {
     "event_schedule_check_hours": 6,
     # チェック専用ソフトは公式サイトを30分間隔で確認する。
     "checker_official_interval_minutes": 30,
-    "checker_days_before": 7,
+    "checker_days_before": 0,
     "checker_days_after": 7,
     "checker_tv_terms": [
         "テレビ出演", "番組出演", "生出演", "TV出演", "出演", "インタビュー",
@@ -300,7 +300,7 @@ DEFAULT_CONFIG = {
         "財務省・記者会見": "https://www.mof.go.jp/public_relations/conference/index.html",
         "日本銀行・会見講演": "https://www.boj.or.jp/about/press/index.htm",
         "日本銀行・公表予定": "https://www.boj.or.jp/about/calendar/index.htm",
-        "外務省・記者会見": "https://www.mofa.go.jp/mofaj/press/kaiken/index.html",
+        "外務省・新着会見発言": "https://www.mofa.go.jp/mofaj/shin/",
         "政府広報・総理会見": "https://www.gov-online.go.jp/press_conferences/prime_minister/"
     },
     "event_schedule_urls": [
@@ -1051,6 +1051,16 @@ def load_config():
         list(DEFAULT_CONFIG.get("excluded_title_terms", []))
         + list(cfg.get("excluded_title_terms", []))
     ))
+    checker_sources = dict(DEFAULT_CONFIG.get("checker_official_sources", {}))
+    checker_sources.update(cfg.get("checker_official_sources", {}))
+    # 旧版の403になる外務省URLは、新着情報ページへ置き換える。
+    checker_sources.pop("外務省・記者会見", None)
+    checker_sources["外務省・新着会見発言"] = (
+        "https://www.mofa.go.jp/mofaj/shin/"
+    )
+    out["checker_official_sources"] = checker_sources
+    # 事前準備用の一覧なので、前日以前の会見・発言は表示しない。
+    out["checker_days_before"] = 0
     return out
 
 
@@ -4101,8 +4111,9 @@ CHECKER_REPORT_FILE = DATA_DIR / "LIVEチェック_1週間一覧.txt"
 CHECKER_LATEST_URL_FILE = DATA_DIR / "検出したLIVE_URL.txt"
 
 
-def _checker_parse_dates(text):
+def _checker_parse_dates(text, reference_day=None):
     """公式ページの周辺文字列から西暦・和暦の日付を取り出す。"""
+    reference_day = reference_day or datetime.now(timezone(timedelta(hours=9))).date()
     values = set()
     patterns = (
         (r"(?<!\d)(20\d{2})[年/\.\-](\d{1,2})[月/\.\-](\d{1,2})日?", False),
@@ -4117,6 +4128,27 @@ def _checker_parse_dates(text):
                 values.add(datetime(year, month, day).date())
             except ValueError:
                 continue
+    for match in re.finditer(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)", text):
+        try:
+            values.add(datetime(*map(int, match.groups())).date())
+        except ValueError:
+            continue
+    for match in re.finditer(r"(?<!\d)(20\d{2})(\d{2})[/\-](\d{2})(?!\d)", text):
+        try:
+            values.add(datetime(*map(int, match.groups())).date())
+        except ValueError:
+            continue
+    for match in re.finditer(r"(?<!\d)(\d{1,2})月\s*(\d{1,2})日", text):
+        try:
+            month, day = map(int, match.groups())
+            candidate = datetime(reference_day.year, month, day).date()
+            if candidate < reference_day - timedelta(days=180):
+                candidate = datetime(reference_day.year + 1, month, day).date()
+            elif candidate > reference_day + timedelta(days=180):
+                candidate = datetime(reference_day.year - 1, month, day).date()
+            values.add(candidate)
+        except ValueError:
+            continue
     return sorted(values)
 
 
@@ -4164,11 +4196,23 @@ def checker_collect_official_events():
                 summary = re.sub(r"\s+", " ", f"{title} {context}").strip()
                 if not summary or not _checker_relevant_text(summary):
                     continue
-                dates = _checker_parse_dates(f"{summary} {href}")
+                clean_title = re.sub(r"\s+", " ", title).strip()
+                if (
+                    clean_title.startswith("#")
+                    or re.fullmatch(r"令和\s*\d+年\s*\d+月", clean_title)
+                    or clean_title in ("トップ", "一覧", "過去の会見", "過去の記者会見")
+                ):
+                    continue
+                # 周辺には別記事の日付も含まれるため、タイトル→URL→直前文の
+                # 順で最初に取れた日付だけをこのリンクの日付として採用する。
+                dates = _checker_parse_dates(title, today)
+                if not dates:
+                    dates = _checker_parse_dates(href, today)
+                if not dates:
+                    dates = _checker_parse_dates(context, today)
                 for event_day in dates:
                     if not (start_day <= event_day <= end_day):
                         continue
-                    clean_title = re.sub(r"\s+", " ", title).strip()
                     if not clean_title or len(clean_title) < 4:
                         clean_title = summary[:160]
                     key = f"{event_day.isoformat()}|{source_name}|{href}"
@@ -4184,20 +4228,24 @@ def checker_collect_official_events():
                         ),
                     }
 
-            # 週間予定のようにリンク単位で日付を取れないページも補完する。
-            plain = visible_page_text(source)
-            for offset in range(-before, after + 1):
-                event_day = today + timedelta(days=offset)
-                for excerpt in page_event_matches(plain, event_day):
-                    key = f"{event_day.isoformat()}|{source_name}|{source_url}|{hashlib.sha1(excerpt.encode('utf-8')).hexdigest()[:10]}"
+            # 日銀の公表予定など、リンクが付かない予定表は表の1行単位で読む。
+            # ページ全体から日付周辺を切り出すとメニューを混ぜるため使用しない。
+            for row_html in re.findall(r"(?is)<tr\b[^>]*>(.*?)</tr>", source):
+                row_text = re.sub(r"\s+", " ", _html_to_plain(row_html)).strip()
+                if not row_text or not _checker_relevant_text(row_text):
+                    continue
+                for event_day in _checker_parse_dates(row_text, today):
+                    if not (start_day <= event_day <= end_day):
+                        continue
+                    key = f"{event_day.isoformat()}|{source_name}|{source_url}|{hashlib.sha1(row_text.encode('utf-8')).hexdigest()[:10]}"
                     found.setdefault(key, {
                         "date": event_day.isoformat(),
                         "source": str(source_name),
-                        "title": excerpt[:220],
+                        "title": row_text[:220],
                         "url": str(source_url),
                         "future": event_day >= today,
                         "tv": any(
-                            str(term).lower() in excerpt.lower()
+                            str(term).lower() in row_text.lower()
                             for term in CONFIG.get("checker_tv_terms", [])
                         ),
                     })
@@ -4339,18 +4387,15 @@ def checker_write_report(live_items, upcoming_items, official_items):
             lines.append("  YouTube: 現時点では配信中・予約LIVEを確認できません")
 
     today = now.date().isoformat()
-    recent = [x for x in official_items if x["date"] < today]
     future = [x for x in official_items if x["date"] >= today]
-    for heading, entries in (("今後7日間の公式予定・発言", future), ("直近7日間の公式会見・発言", recent)):
-        lines.extend(["", f"【{heading}】"])
-        if not entries:
-            lines.append("・該当情報は見つかりませんでした。")
-            continue
-        for entry in entries:
-            lines.extend([
-                f"・{entry['date']} [{entry['source']}] {entry['title']}",
-                f"  {entry['url']}",
-            ])
+    lines.extend(["", "【今日から7日間の公式予定・発言】"])
+    if not future:
+        lines.append("・該当情報は見つかりませんでした。")
+    for entry in future:
+        lines.extend([
+            f"・{entry['date']} [{entry['source']}] {entry['title']}",
+            f"  {entry['url']}",
+        ])
     CHECKER_REPORT_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return lines
 
@@ -4358,11 +4403,10 @@ def checker_write_report(live_items, upcoming_items, official_items):
 def checker_print_summary(live_items, upcoming_items, official_items):
     today = datetime.now(timezone(timedelta(hours=9))).date().isoformat()
     future = [x for x in official_items if x["date"] >= today]
-    recent = [x for x in official_items if x["date"] < today]
     television = [x for x in official_items if x.get("tv")]
     print(
         f"✅ 確認完了: LIVE {len(live_items)}件 / 予約 {len(upcoming_items)}件 / "
-        f"今後7日 {len(future)}件 / 直近7日 {len(recent)}件 / テレビ出演候補 {len(television)}件"
+        f"今日から7日 {len(future)}件 / テレビ出演候補 {len(television)}件"
     )
     for entry in future[:8]:
         mark = "📺" if entry.get("tv") else "📅"
@@ -4385,7 +4429,7 @@ def checker_main():
     print("文字起こし: 行いません")
     print("リプレイ・通常投稿・個人チャンネル: 対象外")
     print(f"配信中LIVE: {live_interval / 60:g}分間隔 / 予約LIVE: {upcoming_interval / 60:g}分間隔")
-    print(f"公式サイト: {official_interval / 60:g}分間隔 / 前後7日間を一覧化")
+    print(f"公式サイト: {official_interval / 60:g}分間隔 / 今日から7日間を一覧化")
     print(f"一覧保存先: {CHECKER_REPORT_FILE}")
     print("終了するときは Ctrl+C を押してください。\n")
 
