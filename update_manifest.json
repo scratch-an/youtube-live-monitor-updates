@@ -1,7 +1,7 @@
 {
-  "version": "7.4.39",
+  "version": "7.4.40",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.39.py",
-  "sha256": "d94a8ce86debaf354bd88d4dd5bf6298182298837968b70ba1ee274b539eb65d",
-  "notes": "LIVEチェック専用ソフトの起動時に、本日の配信中LIVE・予約LIVE・公式予定・テレビ出演候補だけを表示する専用ウィンドウを追加。表示は自動更新され、最新LIVE URLをコピー可能。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.40.py",
+  "sha256": "e7692ee145bf96a30842131e32bb886b83615c8ff93b9f9468e92c790727097a",
+  "notes": "アーカイブテストへ開始前の予約LIVEを入力した場合、終了せず30秒間隔で配信開始を待機する機能を追加。開始を検知すると同じ処理のままGPU文字起こしを開始し、Ctrl+Cで待機を中止可能。"
 }
