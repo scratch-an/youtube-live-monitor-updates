@@ -1,7 +1,7 @@
 {
-  "version": "7.4.41",
+  "version": "7.4.42",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.41.py",
-  "sha256": "071db7b50c78db9f53a08977b1948eacd981ec60ca7cf097361a1fdea5772a50",
-  "notes": "日本語アーカイブのGPU文字起こしを、従来の40秒・2チャンク待ちから20秒・1チャンク即時認識へ変更。medium/float16の精度設定と異常反復・未認識時の自動再認識は維持し、通常の表示遅延を短縮。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.42.py",
+  "sha256": "8f127cbd1e19227132e28f98b0c569b699b73bbb3604b49e29d41c4b7681fa7c",
+  "notes": "日本語アーカイブを前20秒と新しい20秒の40秒重複窓で認識し、新しい部分だけ20秒ごとに表示。進行役の記者判定、国際公共財・物流の要衝・航行などの補正、外国質問の異常反復再認識、会見終了後の再放送停止を追加。"
 }
