@@ -1,7 +1,7 @@
 {
-  "version": "7.4.40",
+  "version": "7.4.41",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.40.py",
-  "sha256": "e7692ee145bf96a30842131e32bb886b83615c8ff93b9f9468e92c790727097a",
-  "notes": "アーカイブテストへ開始前の予約LIVEを入力した場合、終了せず30秒間隔で配信開始を待機する機能を追加。開始を検知すると同じ処理のままGPU文字起こしを開始し、Ctrl+Cで待機を中止可能。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.41.py",
+  "sha256": "071db7b50c78db9f53a08977b1948eacd981ec60ca7cf097361a1fdea5772a50",
+  "notes": "日本語アーカイブのGPU文字起こしを、従来の40秒・2チャンク待ちから20秒・1チャンク即時認識へ変更。medium/float16の精度設定と異常反復・未認識時の自動再認識は維持し、通常の表示遅延を短縮。"
 }
