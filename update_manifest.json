@@ -1,7 +1,7 @@
 {
-  "version": "7.4.34",
+  "version": "7.4.36",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.34.py",
-  "sha256": "dace283abc8a6087eb937465f963a33e58bdf3b5d3c1d7bea6c219d308817b4f",
-  "notes": "片山財務大臣test20260923_002の追加誤認識を補正。指定された国連LIVEを直接監視し、高市総理の会見前後に首相官邸・外務省・政府広報等の公式テキストを監視して認識補正へ利用。国連関連の専門用語ヒントも追加。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.36.py",
+  "sha256": "d1a4d34684cb26a3ab5bbebccda21df8562c810417ef2be56cc5535ca52c6078",
+  "notes": "文字起こしから分離したLIVEチェック専用モードと専用BATを追加。配信中・予約LIVE、首相官邸・内閣府・財務省・日銀・外務省等の前後7日間の会見・発言・予定、テレビ出演候補を定期確認し、YouTube候補URLとともに通知・一覧保存。リプレイは除外。"
 }
