@@ -30,7 +30,7 @@ APP_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = APP_DIR / "config.json"
 DATA_DIR = APP_DIR / "data"
 DATA_DIR.mkdir(exist_ok=True)
-APP_VERSION = "7.4.34"
+APP_VERSION = "7.4.36"
 UPDATER_CONFIG_FILE = APP_DIR / "updater_config.json"
 DEFAULT_UPDATE_MANIFEST_URL = (
     "https://raw.githubusercontent.com/scratch-an/"
@@ -60,6 +60,34 @@ pause
             bat_path.write_text(content, encoding="utf-8-sig")
     except OSError as e:
         print(f"⚠️ 更新専用BATを作成できません: {e}")
+
+
+def ensure_checker_bat():
+    """文字起こしを行わない常駐チェック専用BATを用意する。"""
+    if os.name != "nt":
+        return
+    bat_path = APP_DIR / "LIVEチェック専用.bat"
+    content = """@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+set "PYTHON_EXE=%~dp0.venv\\Scripts\\python.exe"
+if not exist "%PYTHON_EXE%" (
+  echo [ERROR] Virtual environment not found.
+  echo Run the normal initial setup BAT first.
+  echo.
+  pause
+  exit /b 1
+)
+title YouTube LIVE・公式予定チェック専用
+"%PYTHON_EXE%" "%~dp0app.py" --checker-only
+echo.
+pause
+"""
+    try:
+        if not bat_path.exists() or bat_path.read_text(encoding="utf-8-sig") != content:
+            bat_path.write_text(content, encoding="utf-8-sig")
+    except OSError as e:
+        print(f"⚠️ LIVEチェック専用BATを作成できません: {e}")
 
 
 def ensure_gpu_setup_bat():
@@ -256,6 +284,25 @@ DEFAULT_CONFIG = {
     # 配信中Liveを検索する。その日は予約検索を省略し、96回/日に収める。
     "event_live_scan_interval_minutes": 15,
     "event_schedule_check_hours": 6,
+    # チェック専用ソフトは公式サイトを30分間隔で確認する。
+    "checker_official_interval_minutes": 30,
+    "checker_days_before": 7,
+    "checker_days_after": 7,
+    "checker_tv_terms": [
+        "テレビ出演", "番組出演", "生出演", "TV出演", "出演", "インタビュー",
+        "報道番組", "ニュース番組", "特別番組", "対談"
+    ],
+    "checker_official_sources": {
+        "首相官邸・会見演説": "https://www.kantei.go.jp/jp/105/statement/index.html",
+        "首相官邸・総理の一日": "https://www.kantei.go.jp/jp/105/actions/index.html",
+        "内閣府・大臣会見": "https://www.cao.go.jp/minister/index.html",
+        "財務省・週間予定": "https://www.mof.go.jp/public_relations/weekly_schedule/index.htm",
+        "財務省・記者会見": "https://www.mof.go.jp/public_relations/conference/index.html",
+        "日本銀行・会見講演": "https://www.boj.or.jp/about/press/index.htm",
+        "日本銀行・公表予定": "https://www.boj.or.jp/about/calendar/index.htm",
+        "外務省・記者会見": "https://www.mofa.go.jp/mofaj/press/kaiken/index.html",
+        "政府広報・総理会見": "https://www.gov-online.go.jp/press_conferences/prime_minister/"
+    },
     "event_schedule_urls": [
         "https://www.mof.go.jp/public_relations/weekly_schedule/index.htm",
         "https://g20.org/events-calendar/",
@@ -1549,8 +1596,8 @@ def ensure_official_reference_watcher(video_id, person, title, scheduled_start=N
     ).start()
 
 
-def youtube_watch_is_live(video_id):
-    """検索APIを使わず、動画ページの現在Liveフラグを確認する。"""
+def youtube_watch_live_state(video_id):
+    """動画ページから現在のLive状態を返す（True/False/取得失敗None）。"""
     try:
         response = requests.get(
             f"https://www.youtube.com/watch?v={video_id}",
@@ -1558,13 +1605,18 @@ def youtube_watch_is_live(video_id):
             headers={"User-Agent": "Mozilla/5.0"},
         )
         response.raise_for_status()
-        return (
+        return bool(
             '"isLive":true' in response.text
             and '"isLiveContent":true' in response.text
         )
     except Exception as e:
         print(f"⚠️ Live状態確認失敗 ({video_id}): {e}")
-        return False
+        return None
+
+
+def youtube_watch_is_live(video_id):
+    """直接監視用。状態取得に成功し、現在LIVEの動画だけTrueにする。"""
+    return youtube_watch_live_state(video_id) is True
 
 
 def priority_feed_items(channel_name, channel_id):
@@ -3830,6 +3882,14 @@ def process_conference(item, active, processed, event_type="live"):
         notify(f"{person}の予約LIVEを検出", f"{title}\n{url}")
         return
 
+    # 検索時にはLIVEでも、処理スレッド開始までに終了してリプレイへ
+    # 切り替わることがある。音声取得の直前に再確認して終了済みを除外する。
+    live_state = youtube_watch_live_state(vid)
+    if live_state is False:
+        print(f"⏭ 配信終了・リプレイのため除外: {title}")
+        processed.add(vid)
+        return
+
     active.add(vid)
     ensure_official_reference_watcher(
         vid, person, title, scheduled_start=datetime.now(timezone.utc)
@@ -4028,8 +4088,340 @@ def compare_saved_english_audio():
             pass
 
 
+CHECKER_SEEN_FILE = DATA_DIR / "live_checker_seen.json"
+CHECKER_REPORT_FILE = DATA_DIR / "LIVEチェック_1週間一覧.txt"
+CHECKER_LATEST_URL_FILE = DATA_DIR / "検出したLIVE_URL.txt"
+
+
+def _checker_parse_dates(text):
+    """公式ページの周辺文字列から西暦・和暦の日付を取り出す。"""
+    values = set()
+    patterns = (
+        (r"(?<!\d)(20\d{2})[年/\.\-](\d{1,2})[月/\.\-](\d{1,2})日?", False),
+        (r"令和\s*(\d{1,2})年\s*(\d{1,2})月\s*(\d{1,2})日", True),
+    )
+    for pattern, is_reiwa in patterns:
+        for match in re.finditer(pattern, text):
+            try:
+                year, month, day = map(int, match.groups())
+                if is_reiwa:
+                    year += 2018
+                values.add(datetime(year, month, day).date())
+            except ValueError:
+                continue
+    return sorted(values)
+
+
+def _checker_relevant_text(text):
+    terms = (
+        "記者会見", "会見", "演説", "講演", "発言", "談話", "声明",
+        "テレビ出演", "番組出演", "生出演", "TV出演", "出演", "インタビュー",
+        "報道番組", "ニュース番組", "特別番組", "対談",
+        "総理", "財務大臣", "財務官", "総裁", "副総裁", "審議委員",
+        "金融政策決定会合", "国連総会", "G7", "G20", "IMF",
+    )
+    lowered = text.lower()
+    return any(term.lower() in lowered for term in terms)
+
+
+def checker_collect_official_events():
+    """公式サイトから前後7日間の会見・発言・予定を一覧化する。"""
+    jst = timezone(timedelta(hours=9))
+    today = datetime.now(jst).date()
+    before = max(0, int(CONFIG.get("checker_days_before", 7)))
+    after = max(1, int(CONFIG.get("checker_days_after", 7)))
+    start_day = today - timedelta(days=before)
+    end_day = today + timedelta(days=after)
+    found = {}
+
+    sources = CONFIG.get("checker_official_sources", {})
+    for source_name, source_url in sources.items():
+        try:
+            response = requests.get(
+                str(source_url), timeout=(5, 25),
+                headers={"User-Agent": "Mozilla/5.0 YouTubeConferenceChecker/1.0"},
+            )
+            response.raise_for_status()
+            source = _decode_official_html(response)
+            for href, title, context in _html_links_with_context(source, str(source_url)):
+                summary = re.sub(r"\s+", " ", f"{title} {context}").strip()
+                if not summary or not _checker_relevant_text(summary):
+                    continue
+                dates = _checker_parse_dates(f"{summary} {href}")
+                for event_day in dates:
+                    if not (start_day <= event_day <= end_day):
+                        continue
+                    clean_title = re.sub(r"\s+", " ", title).strip()
+                    if not clean_title or len(clean_title) < 4:
+                        clean_title = summary[:160]
+                    key = f"{event_day.isoformat()}|{source_name}|{href}"
+                    found[key] = {
+                        "date": event_day.isoformat(),
+                        "source": str(source_name),
+                        "title": clean_title[:220],
+                        "url": href,
+                        "future": event_day >= today,
+                        "tv": any(
+                            str(term).lower() in summary.lower()
+                            for term in CONFIG.get("checker_tv_terms", [])
+                        ),
+                    }
+
+            # 週間予定のようにリンク単位で日付を取れないページも補完する。
+            plain = visible_page_text(source)
+            for offset in range(-before, after + 1):
+                event_day = today + timedelta(days=offset)
+                for excerpt in page_event_matches(plain, event_day):
+                    key = f"{event_day.isoformat()}|{source_name}|{source_url}|{hashlib.sha1(excerpt.encode('utf-8')).hexdigest()[:10]}"
+                    found.setdefault(key, {
+                        "date": event_day.isoformat(),
+                        "source": str(source_name),
+                        "title": excerpt[:220],
+                        "url": str(source_url),
+                        "future": event_day >= today,
+                        "tv": any(
+                            str(term).lower() in excerpt.lower()
+                            for term in CONFIG.get("checker_tv_terms", [])
+                        ),
+                    })
+        except Exception as e:
+            print(f"⚠️ 公式サイト確認失敗: {source_name} ({e})")
+    return sorted(found.values(), key=lambda x: (x["date"], x["source"], x["title"]))
+
+
+def _checker_load_seen():
+    try:
+        payload = json.loads(CHECKER_SEEN_FILE.read_text(encoding="utf-8"))
+        return set(str(x) for x in payload.get("keys", []))
+    except Exception:
+        return set()
+
+
+def _checker_save_seen(seen):
+    try:
+        CHECKER_SEEN_FILE.write_text(
+            json.dumps({"keys": sorted(seen)[-3000:]}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        print(f"⚠️ チェック履歴を保存できません: {e}")
+
+
+def _checker_copy_live_url(url):
+    CHECKER_LATEST_URL_FILE.write_text(url + "\n", encoding="utf-8")
+    if os.name == "nt":
+        try:
+            subprocess.run(["clip"], input=url, text=True, check=True, timeout=5)
+            print("📋 LIVE URLをクリップボードへコピーしました。")
+        except Exception:
+            pass
+
+
+def _checker_item_key(kind, item):
+    video_id = item.get("id", {}).get("videoId", "")
+    return f"youtube:{kind}:{video_id}"
+
+
+def _checker_valid_youtube_item(item):
+    snippet = item.get("snippet", {})
+    title = snippet.get("title", "")
+    desc = snippet.get("description", "")
+    return bool(
+        is_organization_channel(item)
+        and person_for(title, desc)
+        and not is_excluded_broadcast(title)
+    )
+
+
+def checker_scan_youtube(kind, seen):
+    """文字起こしせず、LIVEまたは予約LIVEの通知だけを行う。"""
+    items = search_live() if kind == "live" else search_upcoming()
+    detected = []
+    for item in items:
+        if not _checker_valid_youtube_item(item):
+            continue
+        video_id = item.get("id", {}).get("videoId", "")
+        if not video_id:
+            continue
+        if kind == "live":
+            state = youtube_watch_live_state(video_id)
+            if state is not True:
+                continue
+        snippet = item.get("snippet", {})
+        title = snippet.get("title", "")
+        channel = snippet.get("channelTitle", "")
+        person = person_for(title, snippet.get("description", ""))
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        start_text = ""
+        if kind == "upcoming":
+            scheduled = scheduled_start_for_video(video_id)
+            if scheduled:
+                start_text = scheduled.astimezone(timezone(timedelta(hours=9))).strftime("%Y-%m-%d %H:%M JST")
+        detected.append({
+            "kind": kind, "person": person, "title": title,
+            "channel": channel, "url": url, "start": start_text,
+        })
+        key = _checker_item_key(kind, item)
+        if key not in seen:
+            label = "配信中LIVE" if kind == "live" else "予約LIVE"
+            detail = f"{person}\n{title}\n{start_text}\n{url}".strip()
+            notify(f"{label}を検出", detail)
+            if kind == "live":
+                _checker_copy_live_url(url)
+            seen.add(key)
+    return detected
+
+
+def checker_write_report(live_items, upcoming_items, official_items):
+    jst = timezone(timedelta(hours=9))
+    now = datetime.now(jst)
+    lines = [
+        "YouTube LIVE・公式予定チェック",
+        f"更新: {now.strftime('%Y-%m-%d %H:%M:%S JST')}",
+        "=" * 72,
+        "",
+        "【現在LIVE】",
+    ]
+    if live_items:
+        for item in live_items:
+            lines.extend([f"・{item['person']} / {item['title']}", f"  {item['url']}"])
+    else:
+        lines.append("・現在、対象の配信中LIVEはありません。")
+    lines.extend(["", "【予約LIVE】"])
+    if upcoming_items:
+        for item in upcoming_items:
+            when = f" ({item['start']})" if item["start"] else ""
+            lines.extend([f"・{item['person']}{when} / {item['title']}", f"  {item['url']}"])
+    else:
+        lines.append("・現在、対象の予約LIVEはありません。")
+
+    # テレビ出演候補と同じ人物名を含むYouTube LIVE／予約枠があれば併記する。
+    youtube_items = list(live_items) + list(upcoming_items)
+    person_terms = (
+        "高市", "片山", "三村", "植田", "内田", "氷見野", "高田",
+        "田村", "小枝", "増一行", "浅田", "佐藤", "ベッセント", "Bessent",
+    )
+    tv_entries = [x for x in official_items if x.get("tv")]
+    lines.extend(["", "【テレビ出演・番組出演候補】"])
+    if not tv_entries:
+        lines.append("・該当情報は見つかりませんでした。")
+    for entry in tv_entries:
+        matches = []
+        official_text = f"{entry['title']} {entry['source']}"
+        names = [name for name in person_terms if name.lower() in official_text.lower()]
+        for item in youtube_items:
+            yt_text = f"{item['person']} {item['title']}"
+            if names and any(name.lower() in yt_text.lower() for name in names):
+                matches.append(item["url"])
+        lines.append(f"・{entry['date']} [{entry['source']}] {entry['title']}")
+        lines.append(f"  公式情報: {entry['url']}")
+        if matches:
+            for url in dict.fromkeys(matches):
+                lines.append(f"  YouTube候補: {url}")
+        else:
+            lines.append("  YouTube: 現時点では配信中・予約LIVEを確認できません")
+
+    today = now.date().isoformat()
+    recent = [x for x in official_items if x["date"] < today]
+    future = [x for x in official_items if x["date"] >= today]
+    for heading, entries in (("今後7日間の公式予定・発言", future), ("直近7日間の公式会見・発言", recent)):
+        lines.extend(["", f"【{heading}】"])
+        if not entries:
+            lines.append("・該当情報は見つかりませんでした。")
+            continue
+        for entry in entries:
+            lines.extend([
+                f"・{entry['date']} [{entry['source']}] {entry['title']}",
+                f"  {entry['url']}",
+            ])
+    CHECKER_REPORT_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return lines
+
+
+def checker_print_summary(live_items, upcoming_items, official_items):
+    today = datetime.now(timezone(timedelta(hours=9))).date().isoformat()
+    future = [x for x in official_items if x["date"] >= today]
+    recent = [x for x in official_items if x["date"] < today]
+    television = [x for x in official_items if x.get("tv")]
+    print(
+        f"✅ 確認完了: LIVE {len(live_items)}件 / 予約 {len(upcoming_items)}件 / "
+        f"今後7日 {len(future)}件 / 直近7日 {len(recent)}件 / テレビ出演候補 {len(television)}件"
+    )
+    for entry in future[:8]:
+        mark = "📺" if entry.get("tv") else "📅"
+        print(f" {mark} {entry['date']} [{entry['source']}] {entry['title'][:90]}")
+    print(f"📄 詳細一覧: {CHECKER_REPORT_FILE}\n")
+
+
+def checker_main():
+    """文字起こしを起動せず、LIVEと公式情報だけを常時監視する。"""
+    if not CONFIG.get("youtube_api_key"):
+        print("config.json の youtube_api_key にYouTube Data API v3のAPIキーを入れてください。")
+        input("Enterで終了...")
+        return
+    live_interval = effective_scan_interval_minutes() * 60
+    upcoming_interval = max(60.0, float(CONFIG.get("upcoming_scan_interval_minutes", 60))) * 60
+    official_interval = max(10.0, float(CONFIG.get("checker_official_interval_minutes", 30))) * 60
+    print("=" * 72)
+    print(f" LIVEチェック専用 / 公式予定1週間一覧  バージョン {APP_VERSION}")
+    print("=" * 72)
+    print("文字起こし: 行いません")
+    print("リプレイ・通常投稿・個人チャンネル: 対象外")
+    print(f"配信中LIVE: {live_interval / 60:g}分間隔 / 予約LIVE: {upcoming_interval / 60:g}分間隔")
+    print(f"公式サイト: {official_interval / 60:g}分間隔 / 前後7日間を一覧化")
+    print(f"一覧保存先: {CHECKER_REPORT_FILE}")
+    print("終了するときは Ctrl+C を押してください。\n")
+
+    seen = _checker_load_seen()
+    next_live = next_upcoming = next_official = 0.0
+    live_items, upcoming_items, official_items = [], [], []
+    first_official_scan = True
+    while True:
+        try:
+            now_mono = time.monotonic()
+            summary_due = False
+            if now_mono >= next_live:
+                live_items = checker_scan_youtube("live", seen)
+                next_live = now_mono + live_interval
+            if now_mono >= next_upcoming:
+                upcoming_items = checker_scan_youtube("upcoming", seen)
+                next_upcoming = now_mono + upcoming_interval
+            if now_mono >= next_official:
+                print(f"🔎 公式サイトを確認中: {datetime.now().strftime('%H:%M:%S')}")
+                official_items = checker_collect_official_events()
+                current_keys = {
+                    f"official:{x['date']}:{x['source']}:{x['url']}" for x in official_items
+                }
+                if not first_official_scan:
+                    for entry in official_items:
+                        key = f"official:{entry['date']}:{entry['source']}:{entry['url']}"
+                        if key not in seen:
+                            notify("公式サイトに新しい会見・発言情報", f"{entry['date']} {entry['source']}\n{entry['title']}\n{entry['url']}")
+                seen.update(current_keys)
+                first_official_scan = False
+                next_official = now_mono + official_interval
+                summary_due = True
+            checker_write_report(live_items, upcoming_items, official_items)
+            if summary_due:
+                checker_print_summary(live_items, upcoming_items, official_items)
+            _checker_save_seen(seen)
+            time.sleep(15)
+        except KeyboardInterrupt:
+            print("\nLIVEチェック専用ソフトを終了しました。")
+            break
+        except YouTubeQuotaExceeded:
+            wait_seconds = seconds_until_safe_quota_retry()
+            print("⚠️ YouTube APIの日次上限です。公式サイト監視は継続し、翌日に再開します。")
+            next_live = next_upcoming = time.monotonic() + wait_seconds
+            time.sleep(30)
+        except Exception as e:
+            print(f"⚠️ チェック処理エラー: {e}")
+            time.sleep(60)
+
+
 def main():
     ensure_update_only_bat()
+    ensure_checker_bat()
     ensure_gpu_setup_bat()
     check_for_updates()
 
@@ -4039,6 +4431,10 @@ def main():
 
     if "--compare-audio" in sys.argv:
         compare_saved_english_audio()
+        return
+
+    if "--checker-only" in sys.argv:
+        checker_main()
         return
 
     if len(sys.argv) >= 2 and sys.argv[1].startswith(("http://", "https://")):
