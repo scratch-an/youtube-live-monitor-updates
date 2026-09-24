@@ -1,7 +1,7 @@
 {
-  "version": "7.4.43",
+  "version": "7.4.44",
   "file": "app.py",
-  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.43.py",
-  "sha256": "36efc6f0ecf85ec7fd0ef3c244a7b9de4722cb006b03ba21bc5342513b4da81f",
-  "notes": "現在のGPUでリアルタイムに追いつく日本語30秒・1チャンクのバランス処理へ変更。40秒重複認識を通常処理から外し、今回確認した高市総理会見の専門用語・進行役話者・幻覚検出を反映。分割投稿は全会見共通で最初だけ発言者名を表示し、2つ目以降は分割番号だけに統一。"
+  "url": "https://raw.githubusercontent.com/scratch-an/youtube-live-monitor-updates/main/releases/app_7.4.44.py",
+  "sha256": "0224e042d8b5f7f5fcf223346e5c684bf1bf6524477c4e9cfa8155709e238425",
+  "notes": "高市総理会見で確認した非核化、判事を輩出、AIサミット開催の意思、AI・半導体・重要鉱物、中東情勢、消費税支援金法案、原油調達多角化などの誤認識を補正。字幕由来の視聴終了文を除外し、時事通信の指名と質問開始の分離、外国プレス後に総理へ戻る話者判定を改善。日本語30秒・1チャンクの高速設定は維持。"
 }
